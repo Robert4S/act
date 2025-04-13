@@ -3,6 +3,8 @@
 For simplicity, the Gnu C Compiler is used to lower and link the emitted assembly, so it is a requirement. The rust toolchain (cargo) is also required to build the compiler and runtime library.
 ## Model of computation
 The act programming language follows the actor model purely. There are no functions or objects, and the main building block for computation is an actor.
+## Memory model
+Memory for programs written in Act is automatically managed by a (slow) tracing garbage collector. The garbage collector cannot run at the same time as any generated code, to prevent race conditions.
 ## What is an actor
 An actor encapsulates an initialiser function, and an updator function that will produce a new state for the actor given a message from its mailbox.
 Actors run in their own threads, and do not "share" memory with other actors. They can send messages to other actors, which will be placed in their mailbox, and popped off so that the other actor may produce a new state for itself. These mailboxes replace the call stack traditionally found in Procedural, Functional, and Object Oriented languages
