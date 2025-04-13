@@ -1,4 +1,4 @@
-use crate::get_rt;
+use crate::{gc::Undefined, get_rt};
 
 use super::gc::{Allocator, Gc, Value};
 use std::{
@@ -33,7 +33,7 @@ impl RTActor {
         Self {
             init,
             update,
-            state: runtime.make_gc(Value::Undefined(String::from("From actor creation"))),
+            state: runtime.make_gc(Value::Undefined(Undefined::Creation)),
         }
     }
 
@@ -259,23 +259,57 @@ impl RT {
         self.actors.get(pid).unwrap().state.clone()
     }
 
-    fn is_finished(&self) -> bool {
-        self.handlers
+    fn is_finished(&mut self) -> bool {
+        let handlers_done = self
+            .handlers
             .iter()
             .filter_map(|(pid, handle)| {
                 if handle.is_finished() {
-                    println!(
-                        "Pid {} finished with {:?}",
-                        pid.0,
-                        self.deref_gc(&self.actor_state(pid))
-                    );
-                    None
-                } else {
                     Some(pid)
+                } else {
+                    None
                 }
             })
-            .next()
-            .is_none()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for pid in handlers_done {
+            println!(
+                "Pid {} finished with {:?}",
+                pid.0,
+                self.deref_gc(&self.actor_state(&pid))
+            );
+            self.actors.remove(&pid);
+            self.mailboxes.remove(&pid);
+            self.handlers.remove(&pid);
+        }
+
+        if self.actors.is_empty() {
+            return true;
+        }
+
+        let mailboxes_empty =
+            self.all_initialised() && self.mailboxes.values().all(VecDeque::is_empty);
+
+        if !mailboxes_empty {
+            false
+        } else {
+            self.mailboxes.keys().for_each(|pid| {
+                println!(
+                    "PID {} finished with {:?}",
+                    pid.0,
+                    self.deref_gc(&self.actor_state(pid))
+                )
+            });
+            true
+        }
+    }
+
+    fn all_initialised(&self) -> bool {
+        self.actors.values().all(|a| match self.deref_gc(&a.state) {
+            Value::Undefined(Undefined::Creation) => false,
+            _ => true,
+        })
     }
 
     fn run_gc(&mut self) {

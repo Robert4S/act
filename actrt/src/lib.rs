@@ -13,7 +13,7 @@ pub fn add(left: u64, right: u64) -> u64 {
 mod gc;
 mod runtime;
 
-use gc::{Gc, Value};
+use gc::{Gc, Undefined, Value};
 use runtime::{Init, Update, RT};
 
 static RT: LazyLock<Arc<Mutex<RT>>> = LazyLock::new(|| Arc::new(Mutex::new(RT::new())));
@@ -60,7 +60,7 @@ pub unsafe extern "C" fn make_gc_string(rt: &mut RT, string: *const i8) -> Gc {
 
 #[no_mangle]
 pub unsafe extern "C" fn make_undefined(rt: &mut RT) -> Gc {
-    rt.make_gc(Value::Undefined("Made undefined".to_owned()))
+    rt.make_gc(Value::Undefined(Undefined::MakeUndefined))
 }
 
 #[no_mangle]

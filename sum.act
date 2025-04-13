@@ -8,7 +8,7 @@ Actor summing {
 
 	Update (num) {
 		if (num <= 0) {
-			return "I am done with my work here";
+			return sum;
 		} else {
 			send(summing, num - 1);
 			return num + sum;

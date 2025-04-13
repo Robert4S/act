@@ -58,7 +58,13 @@ pub enum Value {
     Bool(bool),
     List(Vec<Gc>),
     Pid(Pid),
-    Undefined(String),
+    Undefined(Undefined),
+}
+
+#[derive(Clone, Debug)]
+pub enum Undefined {
+    Creation,
+    MakeUndefined,
 }
 
 impl Gc {
