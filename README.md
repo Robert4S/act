@@ -1,0 +1,47 @@
+# Compiler and runtime for 'Act' programming language
+# Dependencies
+For simplicity, the Gnu C Compiler is used to lower and link the emitted assembly, so it is a requirement. The rust toolchain (cargo) is also required to build the compiler and runtime library.
+## Model of computation
+The act programming language follows the actor model purely. There are no functions or objects, and the main building block for computation is an actor.
+## What is an actor
+An actor encapsulates an initialiser function, and an updator function that will produce a new state for the actor given a message from its mailbox.
+Actors run in their own threads, and do not "share" memory with other actors. They can send messages to other actors, which will be placed in their mailbox, and popped off so that the other actor may produce a new state for itself. These mailboxes replace the call stack traditionally found in Procedural, Functional, and Object Oriented languages
+A program is finished when all actors in it are finished, and actors signal that they are finished by returning as their new state the string "I am done with my work here". Whenever an actor finishes, it's last state before finishing will be printed along with its PID (process identifier).
+## What can an actor do
+The Initialiser and Updater functions for actors are collections of statements. The set of possible statements are as follows:
+### If condition
+Consists of a boolean value, a branch to follow if the boolean is true, and optionally, a branch to follow if it is not true. Each of these branches are also collections of statements.
+#### Syntax:
+if (condition) {
+    <statements>
+} else {
+    <statements>
+};
+*Note:* If statements must be followed by a semicolon, just like any other statement
+### Assignment
+Assignments are for assigning the value of the expression on the right hand side to the variable name on the left hand side
+#### Syntax:
+variable_name = <expression>;
+### Send
+An actor can send a value as a message to another actor, and this message will be added to the other actor's message queue. Any expression can be sent as a message
+#### Syntax:
+send(<expression>, <expression>), where the first argument expression will be validated to be a process ID at runtime
+### Actor creation statement
+Actors can create other actors dynamically, and the name used for the creation of this actor will become a variable with the value of the spawned actor's PID.
+#### Syntax:
+Actor my_actor {
+    State state_name;
+
+    Initialiser {
+        <statements>
+    }
+
+    Update (argument_name) {
+        <statements>
+    }
+}
+
+# Examples
+In this repository you will find the factorial.act file. Run the build script in the repository root, then simply run
+`act -f ./factorial.act`
+And a binary named factorial will be emitted, along with a factorial.S assembly file with the emitted assembly.
