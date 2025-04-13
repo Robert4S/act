@@ -152,7 +152,7 @@ impl RT {
             if rt.lock().unwrap().is_finished() {
                 break;
             }
-            if with_gc {
+            if acc % 16 == 0 && with_gc {
                 rt.lock().unwrap().run_gc();
             }
         }

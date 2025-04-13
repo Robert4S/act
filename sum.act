@@ -1,0 +1,17 @@
+Actor summing {
+	State sum;
+
+	Initialiser {
+		send(summing, 100);
+		return 0;
+	}
+
+	Update (num) {
+		if (num <= 0) {
+			return "I am done with my work here";
+		} else {
+			send(summing, num - 1);
+			return num + sum;
+		};
+	}
+}
