@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{collections::HashMap, fmt::format, iter};
+use std::{collections::HashMap, iter};
 
 type EmitError = String;
 type Result<T> = core::result::Result<T, EmitError>;
@@ -44,7 +44,6 @@ pub enum Instruction {
     },
     Actor(Actor),
     Return(Value),
-    SetLabel(String),
     If {
         cond: Value,
         then: Vec<Instruction>,
@@ -65,45 +64,17 @@ impl Instruction {
                 let into_variable = context.assign_var(name.clone(), Register::Rax, is_toplevel);
                 Ok(format!("{into_rax} \n{into_variable}"))
             }
-            Self::Send { to, value } => {
-                //let into_rsi = context.eval_into(to.clone(), Location::Register(Register::Rsi))?;
-                //let into_temp = context.assign_var(format!("to"), Register::Rsi, is_toplevel);
-                //let into_rdx =
-                //    context.eval_into(value.clone(), Location::Register(Register::Rdx))?;
-                //let back_in = context.mv(
-                //    Location::Variable(context.symbols["to"].clone()),
-                //    Location::Register(Register::Rsi),
-                //);
-                //let into_rdi = context.eval_into(
-                //    Value::Variable(format!("RUNTIME")),
-                //    Location::Register(Register::Rdi),
-                //)?;
-
-                //let res = vec![
-                //    into_rsi,
-                //    into_temp,
-                //    into_rdx,
-                //    back_in,
-                //    into_rdi,
-                //    align_call(),
-                //    format!("call send_actor"),
-                //]
-                //.into_iter()
-                //.fold(String::new(), |acc, instr| format!("{acc}\n{instr}"));
-                //Ok(res)
-                context.eval_into(
-                    Value::Call {
-                        function: String::from("send_actor"),
-                        args: vec![to.clone(), value.clone()],
-                    },
-                    Location::Register(Register::Rax),
-                )
-            }
+            Self::Send { to, value } => context.eval_into(
+                Value::Call {
+                    function: String::from("send_actor"),
+                    args: vec![to.clone(), value.clone()],
+                },
+                Location::Register(Register::Rax),
+            ),
             Self::Return(v) => {
                 let into_rax = context.eval_into(v.clone(), Location::Register(Register::Rax))?;
                 Ok(format!("{into_rax}\nleave\nret"))
             }
-            Self::SetLabel(s) => Ok(format!("{s}:")),
             Self::If {
                 cond,
                 then,
@@ -188,53 +159,6 @@ impl Context {
         merge(&mut self.literals, &other.literals);
         self.literal_counter = other.literal_counter;
         self.label_count = other.label_count;
-    }
-
-    pub fn test(&mut self) -> () {
-        let assignment = Instruction::Assignment {
-            name: String::from("hello_world"),
-            value: Value::Literal(Literal::Number(3.141)),
-        };
-
-        let other_assignment = Instruction::Assignment {
-            name: String::from("goodbye_world"),
-            value: Value::Literal(Literal::Number(6.28)),
-        };
-
-        let ret = Instruction::Return(Value::Variable(String::from("goodbye_world")));
-
-        let if_instr = Instruction::If {
-            cond: Value::Literal(Literal::Bool(true)),
-            then: vec![assignment],
-            otherwise: vec![other_assignment, ret],
-        };
-
-        let s2 = Instruction::If {
-            cond: Value::Literal(Literal::Bool(false)),
-            then: vec![Instruction::Return(Value::Literal(Literal::Number(2.5)))],
-            otherwise: vec![Instruction::Return(Value::Literal(Literal::String(
-                format!("hello_world!"),
-            )))],
-        };
-
-        let update = Update {
-            arg: format!("arg"),
-            body: vec![if_instr, s2],
-        };
-
-        let init = Init {
-            body: vec![Instruction::Return(Value::Literal(Literal::Number(2.73)))],
-        };
-
-        let actor = Actor {
-            name: format!("Yur"),
-            state_name: format!("cock"),
-            update,
-            init,
-        };
-
-        let out = self.to_code(vec![Instruction::Actor(actor)]).unwrap();
-        println!("{out}");
     }
 
     fn setlabel(&mut self, label: &str) -> String {
@@ -343,6 +267,14 @@ impl Context {
         then: Vec<Instruction>,
         otherwise: Vec<Instruction>,
     ) -> Result<String> {
+        let eval_cond = self.eval_into(
+            Value::Call {
+                function: String::from("eval_conditional"),
+                args: vec![cond],
+            },
+            Location::Register(Register::Rax),
+        )?;
+
         let mut then_ctx = self.clone();
         let mut then_block = String::new();
         for instr in then {
@@ -366,13 +298,7 @@ impl Context {
         let rest = self.setlabel("rest");
 
         let res = vec![
-            self.eval_into(
-                Value::Call {
-                    function: String::from("eval_conditional"),
-                    args: vec![cond],
-                },
-                Location::Register(Register::Rax),
-            )?,
+            eval_cond,
             format!("test %rax, %rax"),
             format!("jz {otherwise}"),
             format!("{then}:"),

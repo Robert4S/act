@@ -1,8 +1,8 @@
 Actor factorial {
         State accumulator;
-        
+	
 	Initialiser {
-            send(factorial, 15);
+            send(factorial, 8);
             return 1;
         }
 

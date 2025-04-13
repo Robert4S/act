@@ -1,8 +1,9 @@
 use std::{
+    env,
     ffi::CStr,
-    mem, panic,
+    mem,
     process::exit,
-    sync::{Arc, LazyLock, Mutex, MutexGuard},
+    sync::{Arc, LazyLock, Mutex},
 };
 
 pub fn add(left: u64, right: u64) -> u64 {
@@ -12,8 +13,8 @@ pub fn add(left: u64, right: u64) -> u64 {
 mod gc;
 mod runtime;
 
-mod take2;
-use take2::{Gc, Init, Update, Value, RT};
+use gc::{Gc, Value};
+use runtime::{Init, Update, RT};
 
 static RT: LazyLock<Arc<Mutex<RT>>> = LazyLock::new(|| Arc::new(Mutex::new(RT::new())));
 
@@ -139,8 +140,12 @@ pub unsafe extern "C" fn send_actor(runtime: &mut RT, actor: Gc, value: Gc) {
 
 #[no_mangle]
 pub unsafe extern "C" fn start_runtime() {
+    let with_gc: bool = env::var("ACT_ENABLE_GC")
+        .unwrap_or(String::from("true"))
+        .parse()
+        .unwrap();
     RT::start_runtime(get_rt());
-    RT::supervise();
+    RT::supervise(with_gc);
     exit(0)
 }
 
@@ -151,5 +156,51 @@ pub unsafe extern "C" fn make_static(value: Gc) -> () {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+    static mut FACT: Gc = Gc { ptr: 0 };
+    unsafe extern "C" fn init(rt: &mut RT) -> Gc {
+        let num = make_gc_number(rt, 5.);
+        send_actor(rt, FACT, num);
+        let state = make_gc_number(rt, 1.);
+        return state;
+    }
+
+    unsafe extern "C" fn update(rt: &mut RT, arg: Gc, state: Gc) -> Gc {
+        rt.dump_frees();
+        let stop_value = make_gc_string(
+            rt,
+            b"I am done with my work here\0" as *const [u8; 28] as *const i8,
+        );
+
+        let one_for_cmp = make_gc_number(rt, 1.);
+        let one_for_minus = make_gc_number(rt, 1.);
+
+        let le_res = eval_le(rt, arg, one_for_cmp);
+        let cond_res = eval_conditional(rt, le_res);
+
+        if cond_res == 1 {
+            return stop_value;
+        } else {
+            let minused = eval_minus(rt, arg, one_for_minus);
+            send_actor(rt, FACT, minused);
+            let timesd = eval_mul(rt, arg, state);
+            return timesd;
+        }
+    }
+
+    #[test]
+    fn start_test() {
+        let init = init as *const u8;
+        let update = update as *const u8;
+        unsafe {
+            FACT = make_actor_global(init, update);
+        }
+
+        unsafe {
+            make_static(FACT);
+        }
+
+        unsafe { start_runtime() };
+    }
 }
