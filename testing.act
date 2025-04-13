@@ -1,0 +1,17 @@
+Actor factorial {
+        State accumulator;
+        
+	Initialiser {
+            send(factorial, 15);
+            return 1;
+        }
+
+        Update (message) {
+            if (message <= 1) {
+                return "I am done with my work here";
+            } else {
+                send(factorial, message - 1);
+                return message * accumulator;
+            };
+	}
+}

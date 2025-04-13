@@ -1,6 +1,9 @@
 use std::{f32::NAN, fmt::Debug};
 
-use crate::tokenise::{InfixToken, Token, TokenKind};
+use crate::{
+    codegen::{self, Instruction, Literal, Value},
+    tokenise::{InfixToken, Token, TokenKind},
+};
 use im::Vector;
 
 macro_rules! make_error {
@@ -62,12 +65,28 @@ type Result<T> = std::result::Result<T, ParseError>;
 
 type Cst = Vector<Actor>;
 
+pub fn gen_instructions(cst: Cst) -> Vec<Instruction> {
+    cst.into_iter()
+        .map(|a| Statement::Actor(a))
+        .map(|s| s.to_instr())
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct Actor {
     name: String,
     state: State,
     initialiser: Initialiser,
     update: Update,
+}
+
+impl Actor {
+    fn get_state_name(&self) -> String {
+        match &self.state.0 {
+            Expr::Symbol(s) => s.clone(),
+            _ => panic!("State must be a symbol"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +119,65 @@ pub enum Statement {
     },
 }
 
+impl Statement {
+    pub fn to_instr(&self) -> codegen::Instruction {
+        match self {
+            Statement::Assignment(assignment) => Instruction::Assignment {
+                name: assignment.left.clone(),
+                value: assignment.right.to_value(),
+            },
+            Statement::Return(expr) => Instruction::Return(expr.to_value()),
+            Statement::Actor(actor) => Instruction::Actor(codegen::Actor {
+                name: actor.name.clone(),
+                state_name: actor.get_state_name(),
+                init: codegen::Init {
+                    body: actor
+                        .initialiser
+                        .body
+                        .clone()
+                        .into_iter()
+                        .map(|s| s.to_instr())
+                        .collect::<Vec<Instruction>>(),
+                },
+                update: codegen::Update {
+                    arg: actor.update.inp_name.clone(),
+                    body: actor
+                        .update
+                        .body
+                        .clone()
+                        .into_iter()
+                        .map(|s| s.to_instr())
+                        .collect::<Vec<Instruction>>(),
+                },
+            }),
+            Statement::Send { destination, value } => Instruction::Send {
+                to: destination.to_value(),
+                value: value.to_value(),
+            },
+            Statement::If {
+                condition,
+                body,
+                otherwise,
+            } => Instruction::If {
+                cond: condition.to_value(),
+                then: body
+                    .clone()
+                    .into_iter()
+                    .map(|s| s.to_instr())
+                    .collect::<Vec<Instruction>>(),
+                otherwise: otherwise
+                    .clone()
+                    .map(|body| {
+                        body.into_iter()
+                            .map(|s| s.to_instr())
+                            .collect::<Vec<Instruction>>()
+                    })
+                    .unwrap_or(vec![]),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Assignment {
     pub left: String,
@@ -117,6 +195,42 @@ pub enum Expr {
         op: InfixToken,
         right: Box<Expr>,
     },
+}
+
+impl Expr {
+    pub fn to_value(&self) -> codegen::Value {
+        match self {
+            Expr::Number(n) => Value::Literal(Literal::Number(*n)),
+            Expr::String(s) => Value::Literal(Literal::String(s.clone())),
+            Expr::Symbol(s) => Value::Variable(s.clone()),
+            Expr::Bool(b) => Value::Literal(Literal::Bool(*b)),
+            Expr::Infix { left, op, right } => {
+                infix_to_value(left.clone(), op.clone(), right.clone())
+            }
+        }
+    }
+}
+
+fn infix_to_value(left: Box<Expr>, op: InfixToken, right: Box<Expr>) -> codegen::Value {
+    let function = match op {
+        InfixToken::Plus => "eval_plus",
+        InfixToken::Minus => "eval_minus",
+        InfixToken::And => "eval_and",
+        InfixToken::Or => "eval_or",
+        InfixToken::GE => "eval_ge",
+        InfixToken::LE => "eval_le",
+        InfixToken::Greater => "eval_greater",
+        InfixToken::Lesser => "eval_lesser",
+        InfixToken::Equal => "eval_eq",
+        InfixToken::Mul => "eval_mul",
+        InfixToken::Div => "eval_div",
+        InfixToken::Assign => panic!("Assigning is not an expression"),
+    };
+
+    Value::Call {
+        function: function.to_string(),
+        args: vec![left.to_value(), right.to_value()],
+    }
 }
 
 pub fn parse(tokens: &[Token]) -> Result<Cst> {

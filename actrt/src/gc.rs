@@ -1,14 +1,25 @@
-use std::{ops::Deref, sync::Mutex};
+use std::{
+    ops::{self, Deref},
+    panic,
+    sync::{LazyLock, Mutex, MutexGuard},
+};
 
-use crate::runtime::{Pid, RUNTIME};
+use crate::runtime::{get_runtime, Pid, Runtime};
 
 #[derive(Debug)]
 pub struct Allocator {
-    values: Mutex<Vec<Option<Value>>>,
+    pub values: Mutex<Vec<Option<Value>>>,
     free: Mutex<Vec<usize>>,
 }
 
 impl Allocator {
+    #[track_caller]
+    fn lock_value(&self) -> MutexGuard<Vec<Option<Value>>> {
+        let caller = panic::Location::caller();
+        println!("called from {}", caller);
+        self.values.lock().unwrap()
+    }
+
     pub fn new() -> Self {
         Self {
             values: Mutex::new(Vec::new()),
@@ -18,10 +29,10 @@ impl Allocator {
 
     pub fn alloc(&self, value: Value) -> usize {
         if let Some(idx) = self.free.lock().unwrap().pop() {
-            self.values.lock().unwrap()[idx] = Some(value);
+            self.lock_value()[idx] = Some(value);
             idx
         } else {
-            let mut values = self.values.lock().unwrap();
+            let mut values = self.lock_value();
             values.push(Some(value));
             values.len() - 1
         }
@@ -42,12 +53,19 @@ impl Allocator {
             .collect::<Vec<usize>>();
 
         marks.dedup();
-        let mut values = self.values.lock().unwrap();
+        let not_marked = {
+            let values = self.lock_value();
 
-        let not_marked = (0..(values.len() - 1))
-            .filter(|key| !marks.contains(key))
-            .collect::<Vec<usize>>();
+            (0..(values.len() - 1))
+                .filter(|key| !marks.contains(key))
+                .collect::<Vec<usize>>()
+        };
 
+        unsafe { self.sweep(not_marked) }
+    }
+
+    pub unsafe fn sweep(&self, not_marked: Vec<usize>) -> () {
+        let mut values = self.lock_value();
         let mut free = self.free.lock().unwrap();
         not_marked.into_iter().for_each(|key| {
             values[key] = None;
@@ -56,7 +74,7 @@ impl Allocator {
     }
 
     pub unsafe fn get(&self, idx: usize) -> &Value {
-        let b = self.values.lock().unwrap();
+        let b = self.lock_value();
         let reference = b.get(idx).unwrap();
         match reference {
             Some(v) => unsafe { &*(v as *const Value) },
@@ -72,7 +90,7 @@ pub enum Value {
     Bool(bool),
     List(Vec<Gc>),
     Pid(Pid),
-    Undefined,
+    Undefined(String),
 }
 
 impl Gc {
@@ -99,13 +117,13 @@ impl Value {
                 .flatten()
                 .collect(),
             Self::Pid(num) => num.mark(),
-            Self::Undefined => panic!("Value is not defined"),
+            Self::Undefined(_) => vec![],
         }
     }
 }
 
 #[repr(C)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Copy)]
 pub struct Gc {
     ptr: usize,
 }
@@ -126,12 +144,79 @@ impl Eq for Gc {
 
 impl Gc {
     pub fn new(val: Value) -> Self {
-        let ptr = RUNTIME.allocator.alloc(val);
+        let ptr = get_runtime().allocator.alloc(val);
         Self { ptr }
     }
 
     pub fn own_ptr(&self) -> usize {
         self.ptr
+    }
+
+    pub fn eval_ge(&self, rhs: Self) -> Gc {
+        let v1: &Value = &self;
+        let v2: &Value = &rhs;
+
+        match (v1, v2) {
+            (Value::Number(n1), Value::Number(n2)) => Gc::new(Value::Bool(n1 >= n2)),
+            _ => panic!("Mismatched types, expected numbers for ge"),
+        }
+    }
+
+    pub fn eval_greater(&self, rhs: Self) -> Gc {
+        let v1: &Value = &self;
+        let v2: &Value = &rhs;
+
+        match (v1, v2) {
+            (Value::Number(n1), Value::Number(n2)) => Gc::new(Value::Bool(n1 > n2)),
+            _ => panic!("Mismatched types, expected numbers for greater"),
+        }
+    }
+
+    pub fn eval_le(&self, rhs: Self) -> Gc {
+        let v1: &Value = &self;
+        let v2: &Value = &rhs;
+
+        match (v1, v2) {
+            (Value::Number(n1), Value::Number(n2)) => Gc::new(Value::Bool(n1 <= n2)),
+            _ => panic!("Mismatched types, expected numbers for le"),
+        }
+    }
+
+    pub fn eval_lesser(&self, rhs: Self) -> Gc {
+        let v1: &Value = &self;
+        let v2: &Value = &rhs;
+
+        match (v1, v2) {
+            (Value::Number(n1), Value::Number(n2)) => Gc::new(Value::Bool(n1 < n2)),
+            _ => panic!("Mismatched types, expected numbers for lesser"),
+        }
+    }
+
+    pub fn eval_and(&self, rhs: Self) -> Gc {
+        let v1: &Value = &self;
+        let v2: &Value = &rhs;
+
+        match (v1, v2) {
+            (Value::Bool(b1), Value::Bool(b2)) => Gc::new(Value::Bool(*b1 && *b2)),
+            _ => panic!("Mismatched types, expected numbers for lesser"),
+        }
+    }
+
+    pub fn eval_or(&self, rhs: Self) -> Gc {
+        let v1: &Value = &self;
+        let v2: &Value = &rhs;
+
+        match (v1, v2) {
+            (Value::Bool(b1), Value::Bool(b2)) => Gc::new(Value::Bool(*b1 || *b2)),
+            _ => panic!("Mismatched types, expected numbers for lesser"),
+        }
+    }
+
+    pub fn eval_eq(&self, rhs: Self) -> Gc {
+        let v1: &Value = &self;
+        let v2: &Value = &rhs;
+
+        Gc::new(Value::Bool(Value::eq(v1, v2)))
     }
 }
 
@@ -139,8 +224,60 @@ impl Deref for Gc {
     type Target = Value;
     fn deref(&self) -> &Self::Target {
         unsafe {
-            let val = RUNTIME.allocator.get(self.ptr) as *const Value;
+            let val = get_runtime().allocator.get(self.ptr) as *const Value;
             &*val
+        }
+    }
+}
+
+impl ops::Add for Gc {
+    type Output = Gc;
+    fn add(self, rhs: Self) -> Self::Output {
+        let v1: &Value = &self;
+        let v2: &Value = &rhs;
+
+        match (v1, v2) {
+            (Value::Number(n1), Value::Number(n2)) => Gc::new(Value::Number(n1 + n2)),
+            _ => panic!("Mismatched types, expected numbers for add"),
+        }
+    }
+}
+
+impl ops::Sub for Gc {
+    type Output = Gc;
+    fn sub(self, rhs: Self) -> Self::Output {
+        let v1: &Value = &self;
+        let v2: &Value = &rhs;
+
+        match (v1, v2) {
+            (Value::Number(n1), Value::Number(n2)) => Gc::new(Value::Number(n1 - n2)),
+            _ => panic!("Mismatched types, expected numbers for minus"),
+        }
+    }
+}
+
+impl ops::Mul for Gc {
+    type Output = Gc;
+    fn mul(self, rhs: Self) -> Self::Output {
+        let v1: &Value = &self;
+        let v2: &Value = &rhs;
+
+        match (v1, v2) {
+            (Value::Number(n1), Value::Number(n2)) => Gc::new(Value::Number(n1 * n2)),
+            _ => panic!("Mismatched types, expected numbers for mul"),
+        }
+    }
+}
+
+impl ops::Div for Gc {
+    type Output = Gc;
+    fn div(self, rhs: Self) -> Self::Output {
+        let v1: &Value = &self;
+        let v2: &Value = &rhs;
+
+        match (v1, v2) {
+            (Value::Number(n1), Value::Number(n2)) => Gc::new(Value::Number(n1 / n2)),
+            _ => panic!("Mismatched types, expected numbers for div"),
         }
     }
 }
@@ -179,7 +316,7 @@ pub fn test() {
             .collect(),
     ));
 
-    RUNTIME.allocator.mark_and_sweep(vec![values.clone()]);
+    get_runtime().allocator.mark_and_sweep(vec![values.clone()]);
     assert_exists!(values);
 
     let values: &Value = &values;

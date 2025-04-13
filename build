@@ -1,0 +1,5 @@
+#!/bin/sh
+cd ./act/
+./build
+cd ../actrt/
+./build

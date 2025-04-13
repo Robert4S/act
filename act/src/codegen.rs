@@ -1,5 +1,8 @@
 use core::fmt;
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::format, iter};
+
+type EmitError = String;
+type Result<T> = core::result::Result<T, EmitError>;
 
 fn merge<K: Clone, V: Clone>(map1: &mut HashMap<K, V>, map2: &HashMap<K, V>) -> ()
 where
@@ -11,25 +14,26 @@ where
 }
 
 #[derive(Clone)]
-struct Update {
-    arg: String,
-    body: Vec<Instruction>,
+pub struct Update {
+    pub arg: String,
+    pub body: Vec<Instruction>,
 }
 
 #[derive(Clone)]
-struct Init {
-    body: Vec<Instruction>,
+pub struct Init {
+    pub body: Vec<Instruction>,
 }
 
 #[derive(Clone)]
-struct Actor {
-    name: String,
-    update: Update,
-    init: Init,
+pub struct Actor {
+    pub name: String,
+    pub state_name: String,
+    pub update: Update,
+    pub init: Init,
 }
 
 #[derive(Clone)]
-enum Instruction {
+pub enum Instruction {
     Assignment {
         name: String,
         value: Value,
@@ -48,58 +52,77 @@ enum Instruction {
     },
 }
 
+fn align_call() -> String {
+    format!("and $0xFFFFFFFFFFFFFFF0, %rsp")
+}
+
 impl Instruction {
-    fn to_code(&self, context: &mut Context) -> Option<String> {
+    fn to_code(&self, context: &mut Context, is_toplevel: bool) -> Result<String> {
         match self {
             Self::Assignment { name, value } => {
                 let into_rax =
                     context.eval_into(value.clone(), Location::Register(Register::Rax))?;
-                let into_variable = context.assign_var(name.clone(), Register::Rax);
-                Some(format!("{into_rax} \n{into_variable}"))
+                let into_variable = context.assign_var(name.clone(), Register::Rax, is_toplevel);
+                Ok(format!("{into_rax} \n{into_variable}"))
             }
             Self::Send { to, value } => {
-                let into_rdi = context.eval_into(to.clone(), Location::Register(Register::Rdi))?;
-                let into_temp = context.assign_var(format!("to"), Register::Rdi);
-                let into_rsi =
-                    context.eval_into(value.clone(), Location::Register(Register::Rsi))?;
-                let back_in = context.mv(
-                    Location::Variable(context.symbols["to"]),
-                    Location::Register(Register::Rdi),
-                );
-                let res = vec![
-                    into_rdi,
-                    into_temp,
-                    into_rsi,
-                    back_in,
-                    format!("call send_actor"),
-                ]
-                .into_iter()
-                .fold(String::new(), |acc, instr| format!("{acc}\n{instr}"));
-                Some(res)
+                //let into_rsi = context.eval_into(to.clone(), Location::Register(Register::Rsi))?;
+                //let into_temp = context.assign_var(format!("to"), Register::Rsi, is_toplevel);
+                //let into_rdx =
+                //    context.eval_into(value.clone(), Location::Register(Register::Rdx))?;
+                //let back_in = context.mv(
+                //    Location::Variable(context.symbols["to"].clone()),
+                //    Location::Register(Register::Rsi),
+                //);
+                //let into_rdi = context.eval_into(
+                //    Value::Variable(format!("RUNTIME")),
+                //    Location::Register(Register::Rdi),
+                //)?;
+
+                //let res = vec![
+                //    into_rsi,
+                //    into_temp,
+                //    into_rdx,
+                //    back_in,
+                //    into_rdi,
+                //    align_call(),
+                //    format!("call send_actor"),
+                //]
+                //.into_iter()
+                //.fold(String::new(), |acc, instr| format!("{acc}\n{instr}"));
+                //Ok(res)
+                context.eval_into(
+                    Value::Call {
+                        function: String::from("send_actor"),
+                        args: vec![to.clone(), value.clone()],
+                    },
+                    Location::Register(Register::Rax),
+                )
             }
             Self::Return(v) => {
                 let into_rax = context.eval_into(v.clone(), Location::Register(Register::Rax))?;
-                Some(format!("{into_rax}\nleave\nret"))
+                Ok(format!("{into_rax}\nleave\nret"))
             }
-            Self::SetLabel(s) => Some(format!("{s}:")),
+            Self::SetLabel(s) => Ok(format!("{s}:")),
             Self::If {
                 cond,
                 then,
                 otherwise,
             } => context.gen_if(cond.clone(), then.clone(), otherwise.clone()),
-            Self::Actor(a) => context.gen_actor(a.clone()),
+            Self::Actor(a) => context.gen_actor(a.clone(), is_toplevel),
         }
     }
 }
 
 #[derive(Clone, Debug)]
-enum Value {
+pub enum Value {
     Variable(String),
     Literal(Literal),
+    Call { function: String, args: Vec<Value> },
 }
 
 #[derive(Clone, Debug)]
-enum Literal {
+pub enum Literal {
     String(String),
     Number(f32),
     Bool(bool),
@@ -124,12 +147,26 @@ impl fmt::Display for Literal {
 #[derive(Clone)]
 pub struct Context {
     literals: HashMap<usize, Literal>,
-    symbols: HashMap<String, usize>,
+    symbols: HashMap<String, Address>,
     literal_counter: usize,
     stack_offset: usize,
     label_count: usize,
-    actors: Vec<Actor>,
+    actors: Vec<(String, String, String)>,
     max_size: usize,
+}
+
+#[derive(PartialEq, Eq, Clone)]
+enum Address {
+    Local(usize),
+    Global(String),
+}
+
+fn get_align(literal: &Literal) -> usize {
+    match literal {
+        Literal::String(_) => 1,
+        Literal::Number(_) => 4,
+        Literal::Bool(_) => 8,
+    }
 }
 
 impl Context {
@@ -191,6 +228,7 @@ impl Context {
 
         let actor = Actor {
             name: format!("Yur"),
+            state_name: format!("cock"),
             update,
             init,
         };
@@ -205,17 +243,20 @@ impl Context {
         format!("{label}_{label_id}")
     }
 
-    fn gen_block(&mut self, block: Vec<Instruction>) -> Option<String> {
+    fn gen_block(&mut self, block: Vec<Instruction>) -> Result<String> {
         let mut instrs = String::new();
         for instr in block {
-            instrs.push_str(&instr.to_code(self)?);
+            instrs.push_str(&instr.to_code(self, false)?);
             instrs.push('\n');
         }
-        Some(instrs)
+        Ok(instrs)
     }
 
-    fn gen_actor(&mut self, actor: Actor) -> Option<String> {
+    fn gen_actor(&mut self, actor: Actor, is_toplevel: bool) -> Result<String> {
+        let ending = self.assign_var(actor.name.clone(), Register::Rax, is_toplevel);
+
         let mut init_ctx = self.clone();
+        let load_rt = init_ctx.assign_var(String::from("RUNTIME"), Register::Rdi, false);
         init_ctx.stack_offset = 0;
         let init_block = init_ctx.gen_block(actor.init.body.clone())?;
 
@@ -223,6 +264,7 @@ impl Context {
             format!("push %rbp"),
             format!("mov %rsp, %rbp"),
             format!("sub ${}, %rsp", init_ctx.max_size),
+            load_rt,
             init_block,
         ]
         .into_iter()
@@ -232,16 +274,18 @@ impl Context {
 
         let mut update_ctx = self.clone();
         update_ctx.stack_offset = 0;
-        let mut into_var = update_ctx.assign_var(actor.update.arg.clone(), Register::Rdi);
-        let load_state = update_ctx.assign_var(format!("state"), Register::Rsi);
+        let mut into_var = update_ctx.assign_var(actor.update.arg.clone(), Register::Rsi, false);
+        let load_state = update_ctx.assign_var(actor.state_name.clone(), Register::Rdx, false);
+        let load_rt = update_ctx.assign_var(String::from("RUNTIME"), Register::Rdi, false);
         into_var.push_str(&format!("\n{load_state}"));
         let update_block = update_ctx.gen_block(actor.update.body.clone())?;
-        into_var.push_str(&update_block);
+        into_var.push_str(&format!("\n{update_block}"));
 
         let update_epilogue = vec![
             format!("push %rbp"),
             format!("mov %rsp, %rbp"),
             format!("sub ${}, %rsp", update_ctx.max_size),
+            load_rt,
             into_var,
         ]
         .into_iter()
@@ -256,26 +300,41 @@ impl Context {
             format!("jmp {rest}"),
             format!("{init}:"),
             init_epilogue,
+            align_call(),
             format!("call make_undefined"),
             format!("leave"),
             format!("ret"),
             format!("{update}:"),
             update_epilogue,
+            align_call(),
             format!("call make_undefined"),
             format!("leave"),
             format!("ret"),
             format!("{rest}:"),
-            format!("lea {init}(%rip), %rdi"),
-            format!("lea {update}(%rip), %rsi"),
-            format!("call make_actor"),
-            self.assign_var(actor.name.clone(), Register::Rax),
+            if !is_toplevel {
+                vec![
+                    format!("lea {init}(%rip), %rdi"),
+                    format!("lea {update}(%rip), %rsi"),
+                    align_call(),
+                    format!("call make_actor"),
+                    self.mv(
+                        Location::Register(Register::Rax),
+                        Location::Variable(self.symbols[&actor.name].clone()),
+                    ),
+                ]
+                .join("\n")
+            } else {
+                String::new()
+            },
+            ending,
         ]
         .into_iter()
         .fold(String::new(), |acc, instr| format!("{acc}\n{instr}"));
 
-        self.actors.push(actor);
+        self.actors
+            .push((actor.name.clone(), init.clone(), update.clone()));
 
-        Some(res)
+        Ok(res)
     }
 
     fn gen_if(
@@ -283,13 +342,11 @@ impl Context {
         cond: Value,
         then: Vec<Instruction>,
         otherwise: Vec<Instruction>,
-    ) -> Option<String> {
-        let into_rdi = self.eval_into(cond, Location::Register(Register::Rdi))?;
-
+    ) -> Result<String> {
         let mut then_ctx = self.clone();
         let mut then_block = String::new();
         for instr in then {
-            then_block.push_str(&instr.to_code(&mut then_ctx)?);
+            then_block.push_str(&instr.to_code(&mut then_ctx, false)?);
             then_block.push('\n')
         }
         self.merge(&then_ctx);
@@ -299,7 +356,7 @@ impl Context {
 
         let mut otherwise_block = String::new();
         for instr in otherwise {
-            otherwise_block.push_str(&instr.to_code(&mut otherwise_ctx)?);
+            otherwise_block.push_str(&instr.to_code(&mut otherwise_ctx, false)?);
             otherwise_block.push('\n');
         }
         self.merge(&otherwise_ctx);
@@ -309,8 +366,13 @@ impl Context {
         let rest = self.setlabel("rest");
 
         let res = vec![
-            format!("{into_rdi}"),
-            format!("call eval_conditional"),
+            self.eval_into(
+                Value::Call {
+                    function: String::from("eval_conditional"),
+                    args: vec![cond],
+                },
+                Location::Register(Register::Rax),
+            )?,
             format!("test %rax, %rax"),
             format!("jz {otherwise}"),
             format!("{then}:"),
@@ -323,27 +385,71 @@ impl Context {
         .into_iter()
         .fold(String::new(), |acc, s| format!("{acc}\n{s}"));
 
-        Some(res)
+        Ok(res)
     }
 
-    fn to_code(&mut self, instructions: Vec<Instruction>) -> Option<String> {
-        let mut code = String::new();
-        for instr in instructions {
-            code.push_str(&instr.to_code(self)?);
+    fn get_var(&self, name: &str) -> Address {
+        self.symbols.get(name).unwrap().clone()
+    }
+
+    pub fn to_code(&mut self, instructions: Vec<Instruction>) -> Result<String> {
+        let actors: Vec<_> = instructions
+            .iter()
+            .filter_map(|instr| match instr {
+                Instruction::Actor(a) => Some(a),
+                _ => None,
+            })
+            .cloned()
+            .collect();
+
+        for actor in actors {
+            self.assign_var(actor.name, Register::Rax, true);
         }
+
+        let mut code = String::new();
+
+        for instr in instructions {
+            code.push_str(&instr.to_code(self, true)?);
+        }
+
         let literals = self
             .literals
             .iter()
-            .map(|(name, val)| format!("lit_{name}: {val}"))
+            .map(|(name, val)| format!(".align {}\nlit_{name}: {val}", get_align(val)))
             .fold(String::new(), |acc, instr| format!("{acc}\n{instr}"));
 
-        let epilogue = vec![
-            format!("push %rbp"),
-            format!("mov %rsp, %rbp"),
-            format!("sub ${}, %rsp", self.max_size),
-        ]
-        .into_iter()
-        .fold(String::new(), |acc, instr| format!("{acc}\n{instr}"));
+        //let epilogue = vec![
+        //    format!("push %rbp"),
+        //    format!("mov %rsp, %rbp"),
+        //    format!("sub ${}, %rsp", self.max_size),
+        //]
+        //.into_iter()
+        //.fold(String::new(), |acc, instr| format!("{acc}\n{instr}"));
+
+        let make_actors = self
+            .actors
+            .clone()
+            .into_iter()
+            .map(|(name, init, update)| {
+                vec![
+                    format!("lea {init}(%rip), %rdi"),
+                    format!("lea {update}(%rip), %rsi"),
+                    align_call(),
+                    format!("call make_actor_global"),
+                    self.mv(
+                        Location::Register(Register::Rax),
+                        Location::Variable(self.get_var(&name)),
+                    ),
+                    self.mv(
+                        Location::Variable(self.get_var(&name)),
+                        Location::Register(Register::Rdi),
+                    ),
+                    align_call(),
+                    format!("call make_static"),
+                ]
+                .join("\n")
+            })
+            .fold(String::new(), |acc, instr| format!("{acc}\n{instr}"));
 
         let res = vec![
             format!(".data"),
@@ -351,8 +457,10 @@ impl Context {
             format!(".text"),
             format!(".globl _start"),
             format!("_start:"),
-            epilogue,
+            //epilogue,
             format!("{code}"),
+            make_actors,
+            align_call(),
             format!("call start_runtime"),
         ]
         .into_iter()
@@ -361,7 +469,7 @@ impl Context {
         .filter(|line| !line.trim().is_empty())
         .fold(String::new(), |acc, line| format!("{acc}\n{line}"));
 
-        Some(res)
+        Ok(res)
     }
 
     fn make_literal(&mut self, literal: Literal) -> (String, Location) {
@@ -379,31 +487,103 @@ impl Context {
         let target = if let Literal::Number(_) = literal {
             Register::Xmm0
         } else {
-            Register::Rdi
+            Register::Rsi
         };
 
-        let mv = self.mv(lit, Location::Register(target));
-        let code = format!("{mv} \ncall {funct}");
+        let load_rt = self.load_rt();
+
+        let mv = self.mv(lit, Location::Register(target.clone()));
+        let code = if funct == "make_gc_string" {
+            format!(
+                "{load_rt}\nlea lit_{l_id}(%rip), %{target} \n{}\ncall {funct}",
+                align_call()
+            )
+        } else {
+            format!("{load_rt}\n{mv} \n{}\ncall {funct}", align_call())
+        };
+
         (code, Location::Register(Register::Rax))
     }
 
-    fn eval_into(&mut self, value: Value, dest: Location) -> Option<String> {
+    fn load_rt(&mut self) -> String {
+        self.eval_into(
+            Value::Variable(format!("RUNTIME")),
+            Location::Register(Register::Rdi),
+        )
+        .unwrap_or(
+            vec![
+                align_call(),
+                format!("call get_runtime"),
+                self.mv(
+                    Location::Register(Register::Rax),
+                    Location::Register(Register::Rdi),
+                ),
+            ]
+            .join("\n"),
+        )
+    }
+
+    fn eval_into(&mut self, value: Value, dest: Location) -> Result<String> {
         match value {
             Value::Literal(l) => {
                 let (source_code, source) = self.make_literal(l);
                 let move_code = self.mv(source, dest);
-                Some(format!("{source_code} \n{move_code}"))
+                Ok(format!("{source_code} \n{move_code}"))
             }
             Value::Variable(s) => {
                 let source = self.get_variable(s)?;
                 let move_code = self.mv(source, dest);
-                Some(move_code)
+                Ok(move_code)
+            }
+            Value::Call {
+                function,
+                args: mut rest,
+            } => {
+                let mut args = vec![Value::Variable(format!("RUNTIME"))];
+                args.append(&mut rest);
+                let mut ids = vec![];
+                let spilled: Result<Vec<String>> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, arg)| {
+                        let id = self.allocate_space(format!("${i}"));
+                        ids.push(id);
+                        self.eval_into(arg.clone(), Location::Variable(Address::Local(id)))
+                    })
+                    .collect();
+
+                let arg_registers =
+                    vec![Register::Rdi, Register::Rsi, Register::Rdx, Register::Rcx];
+
+                let mut spilled = spilled?;
+
+                let into_registers = args
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("mov -{}(%rbp), %{}", ids[i], arg_registers[i]))
+                    .chain(iter::once(format!(
+                        "{}\n{}\n{}\ncall {function}\n{}",
+                        align_call(),
+                        self.load_rt(),
+                        align_call(),
+                        self.mv(Location::Register(Register::Rax), dest)
+                    )))
+                    .fold(String::new(), |acc, instr| format!("{acc}\n{instr}"));
+
+                spilled.push(into_registers);
+
+                Ok(spilled.join("\n"))
             }
         }
     }
 
-    fn get_variable(&mut self, name: String) -> Option<Location> {
-        Some(Location::Variable(*self.symbols.get(&name)?))
+    fn get_variable(&mut self, name: String) -> Result<Location> {
+        Ok(Location::Variable(
+            self.symbols
+                .get(&name)
+                .ok_or(format!("Unknown variable {name}"))?
+                .clone(),
+        ))
     }
 
     fn mv(&mut self, source: Location, dest: Location) -> String {
@@ -416,23 +596,43 @@ impl Context {
             String::from("mov")
         };
 
-        let source = source.as_gas_text();
+        if source.is_memory() && dest.is_memory() {
+            vec![
+                self.mv(source, Location::Register(Register::Rax)),
+                self.mv(Location::Register(Register::Rax), dest),
+            ]
+            .join("\n")
+        } else {
+            let source = source.as_gas_text();
 
-        let dest = dest.as_gas_text();
+            let dest = dest.as_gas_text();
 
-        format!("{op} {source}, {dest}")
+            format!("{op} {source}, {dest}")
+        }
     }
 
-    fn allocate_space(&mut self) -> usize {
+    fn allocate_space(&mut self, name: String) -> usize {
         self.stack_offset += 8;
         self.max_size = usize::max(self.stack_offset, self.max_size);
+        self.symbols.insert(name, Address::Local(self.stack_offset));
         self.stack_offset
     }
 
-    fn assign_var(&mut self, name: String, register: Register) -> String {
-        let offset = self.allocate_space();
-        self.symbols.insert(name, offset);
-        self.mv(Location::Register(register), Location::Variable(offset))
+    fn assign_var(&mut self, name: String, register: Register, global: bool) -> String {
+        if global {
+            self.symbols.entry(name).or_insert_with(|| {
+                let l_id = self.literal_counter;
+                self.literal_counter += 1;
+                self.literals.insert(l_id, Literal::Bool(false));
+                Address::Global(format!("lit_{l_id}"))
+            });
+            return String::new();
+        }
+        let offset = self.allocate_space(name);
+        self.mv(
+            Location::Register(register),
+            Location::Variable(Address::Local(offset)),
+        )
     }
 }
 
@@ -440,7 +640,7 @@ impl Context {
 enum Location {
     Register(Register),
     Symbol(String),
-    Variable(usize),
+    Variable(Address),
 }
 
 impl Location {
@@ -455,12 +655,21 @@ impl Location {
         match self {
             Self::Register(r) => format!("%{r}"),
             Self::Symbol(s) => format!("{s}(%rip)"),
-            Self::Variable(v) => format!("-{v}(%rbp)"),
+            Self::Variable(Address::Local(v)) => format!("-{v}(%rbp)"),
+            Self::Variable(Address::Global(a)) => format!("{a}(%rip)"),
+        }
+    }
+
+    fn is_memory(&self) -> bool {
+        match self {
+            Self::Register(_) => false,
+            _ => true,
         }
     }
 }
 
-#[derive(PartialEq, Eq)]
+#[allow(unused)]
+#[derive(PartialEq, Eq, Clone)]
 enum Register {
     // General-purpose registers
     Rax,
