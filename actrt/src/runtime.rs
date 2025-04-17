@@ -3,7 +3,10 @@ use crate::{gc::Undefined, get_rt};
 use super::gc::{Allocator, Gc, Value};
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread::{self, yield_now, JoinHandle},
 };
 
@@ -40,10 +43,6 @@ impl RTActor {
     /// Updating will call the updater with the state, and return an actor with the new the state if the output is
     /// normal. If the output signals that the actor is done, the return will be None
     pub fn update(&self, arg: Gc, runtime: &mut RT) -> Option<Self> {
-        let arg_v = runtime.deref_gc(&arg);
-        if let Value::Bool(_) = arg_v {
-            panic!("Fuck you");
-        }
         let new_state = (self.update)(runtime, arg, self.state);
         match runtime.deref_gc(&new_state) {
             Value::String(s) if s.as_str() == "I am done with my work here" => None,
@@ -59,11 +58,13 @@ impl RTActor {
 pub struct RT {
     mailboxes: HashMap<Pid, VecDeque<Gc>>,
     actors: HashMap<Pid, RTActor>,
+    daemons: HashMap<Pid, RTActor>,
     statics: Vec<Gc>,
     started: bool,
     allocator: Allocator,
     pid_counter: usize,
     handlers: HashMap<Pid, JoinHandle<()>>,
+    kill_yourself: Arc<AtomicBool>,
 }
 
 impl RT {
@@ -71,11 +72,13 @@ impl RT {
         Self {
             mailboxes: HashMap::new(),
             actors: HashMap::new(),
+            daemons: HashMap::new(),
             statics: Vec::new(),
             started: false,
             allocator: Allocator::new(),
             pid_counter: 0,
             handlers: HashMap::new(),
+            kill_yourself: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -93,7 +96,23 @@ impl RT {
         self.mailboxes.insert(pid, VecDeque::new());
 
         if self.started {
-            self.start_actor(rt, pid);
+            self.start_actor(rt, pid, false);
+        }
+
+        pid
+    }
+
+    /// If the runtime has been started, this will immediately spawn a thread to "run" the daemon.
+    /// If not, the actor will be started once the runtime is started
+    pub fn make_daemon(&mut self, rt: &'static Arc<Mutex<RT>>, init: Init, update: Update) -> Pid {
+        let actor = RTActor::new(init, update, self);
+        self.pid_counter += 1;
+        let pid = Pid(self.pid_counter);
+        self.daemons.insert(pid, actor);
+        self.mailboxes.insert(pid, VecDeque::new());
+
+        if self.started {
+            self.start_actor(rt, pid, true);
         }
 
         pid
@@ -105,7 +124,15 @@ impl RT {
     }
 
     pub fn mark_actor(&self, pid: &Pid) -> Vec<Gc> {
-        let state = self.actors.get(pid).unwrap().state;
+        let state = self
+            .actors
+            .get(pid)
+            .unwrap_or_else(|| {
+                self.daemons
+                    .get(pid)
+                    .expect(&format!("Cant find pid {pid:?}"))
+            })
+            .state;
         let mut from_state = state.mark(self);
 
         let mailbox = self.mailboxes.get(pid).unwrap();
@@ -120,9 +147,18 @@ impl RT {
         from_state
     }
 
-    pub fn start_actor(&mut self, rt: &'static Arc<Mutex<RT>>, pid: Pid) -> () {
-        let handler = thread::spawn(move || Self::run_actor(pid, &rt));
-        self.handlers.insert(pid, handler);
+    pub fn start_actor(&mut self, rt: &'static Arc<Mutex<RT>>, pid: Pid, is_daemon: bool) -> () {
+        let kill_yourself = if is_daemon {
+            self.kill_yourself.clone()
+        } else {
+            Arc::new(AtomicBool::new(false))
+        };
+        let handler = thread::spawn(move || Self::run_actor(pid, &rt, kill_yourself));
+        if is_daemon {
+            self.handlers.insert(pid, handler);
+        } else {
+            self.handlers.insert(pid, handler);
+        }
     }
 
     pub fn start_runtime(rt: &'static Arc<Mutex<RT>>) -> () {
@@ -130,7 +166,13 @@ impl RT {
         let keys = lock.actors.keys().cloned().collect::<Vec<Pid>>();
 
         for k in keys {
-            lock.start_actor(rt, k);
+            lock.start_actor(rt, k, false);
+        }
+
+        let daemons = lock.daemons.keys().cloned().collect::<Vec<Pid>>();
+
+        for d in daemons {
+            lock.start_actor(rt, d, true);
         }
 
         lock.started = true;
@@ -171,11 +213,14 @@ impl RT {
 }
 
 impl RT {
-    fn run_actor(pid: Pid, rt: &'static Arc<Mutex<RT>>) {
+    fn run_actor(pid: Pid, rt: &'static Arc<Mutex<RT>>, kill_myself: Arc<AtomicBool>) {
         let mut lock = rt.lock().unwrap();
         lock.init_actor(pid);
         drop(lock);
         loop {
+            if kill_myself.load(Ordering::SeqCst) {
+                break;
+            }
             // VERY IMPORTANT: You cannot lock the world without having a lock on the runtime,
             // because if you do not have a lock on the runtime, the garbage collecter may get one.
             // This will result in a deadlock where the GC has the runtime and wants to stop the
@@ -192,13 +237,21 @@ impl RT {
     }
 
     fn init_actor(&mut self, pid: Pid) {
-        let actor = self.actors.get(&pid).unwrap().clone();
+        let actor = self
+            .actors
+            .get(&pid)
+            .unwrap_or_else(|| self.daemons.get(&pid).unwrap())
+            .clone();
         let state = (actor.init)(self);
         let new_actor = RTActor {
             state,
             ..actor.clone()
         };
-        self.actors.insert(pid, new_actor);
+        if self.actors.contains_key(&pid) {
+            self.actors.insert(pid, new_actor);
+        } else {
+            self.daemons.insert(pid, new_actor);
+        }
     }
 
     fn live_values(&mut self, roots: Vec<Gc>) -> Vec<usize> {
@@ -227,12 +280,20 @@ impl RT {
     }
 
     fn update_actor(&mut self, pid: Pid) -> Option<GcResult> {
-        let actor = self.actors.get(&pid).unwrap().clone();
+        let actor = self
+            .actors
+            .get(&pid)
+            .unwrap_or_else(|| self.daemons.get(&pid).unwrap())
+            .clone();
         let message = self.mailboxes.get_mut(&pid).unwrap().pop_front();
         match message {
             Some(v) => {
                 let new_actor = actor.update(v, self)?;
-                self.actors.insert(pid, new_actor.clone());
+                if self.actors.contains_key(&pid) {
+                    self.actors.insert(pid, new_actor.clone());
+                } else {
+                    self.daemons.insert(pid, new_actor.clone());
+                }
                 Some(GcResult::Updated(new_actor.state))
             }
             None => Some(GcResult::EmptyMailbox),
@@ -256,7 +317,10 @@ impl RT {
     }
 
     fn actor_state(&self, pid: &Pid) -> Gc {
-        self.actors.get(pid).unwrap().state.clone()
+        self.actors
+            .get(pid)
+            .unwrap_or_else(|| self.daemons.get(pid).unwrap())
+            .state
     }
 
     fn is_finished(&mut self) -> bool {
@@ -279,12 +343,17 @@ impl RT {
                 pid.0,
                 self.deref_gc(&self.actor_state(&pid))
             );
-            self.actors.remove(&pid);
+            if self.actors.contains_key(&pid) {
+                self.actors.remove(&pid);
+            } else {
+                self.daemons.remove(&pid);
+            }
             self.mailboxes.remove(&pid);
             self.handlers.remove(&pid);
         }
 
         if self.actors.is_empty() {
+            self.end_runtime();
             return true;
         }
 
@@ -301,8 +370,13 @@ impl RT {
                     self.deref_gc(&self.actor_state(pid))
                 )
             });
+            self.end_runtime();
             true
         }
+    }
+
+    fn end_runtime(&mut self) {
+        self.kill_yourself.store(true, Ordering::SeqCst);
     }
 
     fn all_initialised(&self) -> bool {

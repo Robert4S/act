@@ -24,6 +24,7 @@ pub enum TokenKind {
     State,
     If,
     Else,
+    Daemon,
 
     // Rules
     Infix(InfixToken),
@@ -197,6 +198,7 @@ fn update_keyword(token: Token) -> Token {
         (TokenKind::Symbol(s), n) => (
             match s.as_str() {
                 "Actor" => TokenKind::Actor,
+                "Daemon" => TokenKind::Daemon,
                 "send" => TokenKind::Send,
                 "return" => TokenKind::Return,
                 "false" => TokenKind::False,

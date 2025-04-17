@@ -43,6 +43,7 @@ pub enum Instruction {
         value: Value,
     },
     Actor(Actor),
+    Daemon(Actor),
     Return(Value),
     If {
         cond: Value,
@@ -80,7 +81,8 @@ impl Instruction {
                 then,
                 otherwise,
             } => context.gen_if(cond.clone(), then.clone(), otherwise.clone()),
-            Self::Actor(a) => context.gen_actor(a.clone(), is_toplevel),
+            Self::Actor(a) => context.gen_actor(a.clone(), is_toplevel, false),
+            Self::Daemon(a) => context.gen_actor(a.clone(), is_toplevel, true),
         }
     }
 }
@@ -123,6 +125,7 @@ pub struct Context {
     stack_offset: usize,
     label_count: usize,
     actors: Vec<(String, String, String)>,
+    daemons: Vec<(String, String, String)>,
     max_size: usize,
 }
 
@@ -151,6 +154,7 @@ impl Context {
             stack_offset: 0,
             label_count: 0,
             actors: vec![],
+            daemons: vec![],
             max_size: 0,
         }
     }
@@ -176,7 +180,7 @@ impl Context {
         Ok(instrs)
     }
 
-    fn gen_actor(&mut self, actor: Actor, is_toplevel: bool) -> Result<String> {
+    fn gen_actor(&mut self, actor: Actor, is_toplevel: bool, is_daemon: bool) -> Result<String> {
         let ending = self.assign_var(actor.name.clone(), Register::Rax, is_toplevel);
 
         let mut init_ctx = self.clone();
@@ -240,7 +244,11 @@ impl Context {
                     format!("lea {init}(%rip), %rdi"),
                     format!("lea {update}(%rip), %rsi"),
                     align_call(),
-                    format!("call make_actor"),
+                    if is_daemon {
+                        format!("call make_daemon")
+                    } else {
+                        format!("call make_actor")
+                    },
                     self.mv(
                         Location::Register(Register::Rax),
                         Location::Variable(self.symbols[&actor.name].clone()),
@@ -255,8 +263,13 @@ impl Context {
         .into_iter()
         .fold(String::new(), |acc, instr| format!("{acc}\n{instr}"));
 
-        self.actors
-            .push((actor.name.clone(), init.clone(), update.clone()));
+        if is_daemon {
+            self.daemons
+                .push((actor.name.clone(), init.clone(), update.clone()));
+        } else {
+            self.actors
+                .push((actor.name.clone(), init.clone(), update.clone()));
+        }
 
         Ok(res)
     }
@@ -696,4 +709,14 @@ impl fmt::Display for Register {
         };
         write!(f, "{}", reg_name)
     }
+}
+
+pub fn gen_instructions(cst: Cst) -> Vec<Instruction> {
+    cst.into_iter()
+        .map(|a| match a {
+            ActorKind::Daemon(a) => Statement::Daemon(a),
+            ActorKind::Actor(a) => Statement::Actor(a),
+        })
+        .map(|s| s.to_instr())
+        .collect()
 }

@@ -1,9 +1,6 @@
 use std::{f32::NAN, fmt::Debug};
 
-use crate::{
-    codegen::{self, Instruction, Literal, Value},
-    tokenise::{InfixToken, Token, TokenKind},
-};
+use crate::tokenise::{InfixToken, Token, TokenKind};
 use im::Vector;
 
 macro_rules! make_error {
@@ -63,25 +60,24 @@ impl Debug for ParseError {
 
 type Result<T> = std::result::Result<T, ParseError>;
 
-type Cst = Vector<Actor>;
+pub type Cst = Vector<ActorKind>;
 
-pub fn gen_instructions(cst: Cst) -> Vec<Instruction> {
-    cst.into_iter()
-        .map(|a| Statement::Actor(a))
-        .map(|s| s.to_instr())
-        .collect()
+#[derive(Debug, Clone)]
+pub enum ActorKind {
+    Daemon(Actor),
+    Actor(Actor),
 }
 
 #[derive(Debug, Clone)]
 pub struct Actor {
-    name: String,
-    state: State,
-    initialiser: Initialiser,
-    update: Update,
+    pub name: String,
+    pub state: State,
+    pub initialiser: Initialiser,
+    pub update: Update,
 }
 
 impl Actor {
-    fn get_state_name(&self) -> String {
+    pub fn get_state_name(&self) -> String {
         match &self.state.0 {
             Expr::Symbol(s) => s.clone(),
             _ => panic!("State must be a symbol"),
@@ -90,17 +86,17 @@ impl Actor {
 }
 
 #[derive(Debug, Clone)]
-struct Update {
-    inp_name: String,
-    body: Vector<Statement>,
+pub struct Update {
+    pub inp_name: String,
+    pub body: Vector<Statement>,
 }
 
 #[derive(Debug, Clone)]
-struct State(Expr);
+pub struct State(Expr);
 
 #[derive(Debug, Clone)]
 pub struct Initialiser {
-    body: Vector<Statement>,
+    pub body: Vector<Statement>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +104,7 @@ pub enum Statement {
     Assignment(Assignment),
     Return(Expr),
     Actor(Actor),
+    Daemon(Actor),
     Send {
         destination: Expr,
         value: Expr,
@@ -117,65 +114,6 @@ pub enum Statement {
         body: Vector<Statement>,
         otherwise: Option<Vector<Statement>>,
     },
-}
-
-impl Statement {
-    pub fn to_instr(&self) -> codegen::Instruction {
-        match self {
-            Statement::Assignment(assignment) => Instruction::Assignment {
-                name: assignment.left.clone(),
-                value: assignment.right.to_value(),
-            },
-            Statement::Return(expr) => Instruction::Return(expr.to_value()),
-            Statement::Actor(actor) => Instruction::Actor(codegen::Actor {
-                name: actor.name.clone(),
-                state_name: actor.get_state_name(),
-                init: codegen::Init {
-                    body: actor
-                        .initialiser
-                        .body
-                        .clone()
-                        .into_iter()
-                        .map(|s| s.to_instr())
-                        .collect::<Vec<Instruction>>(),
-                },
-                update: codegen::Update {
-                    arg: actor.update.inp_name.clone(),
-                    body: actor
-                        .update
-                        .body
-                        .clone()
-                        .into_iter()
-                        .map(|s| s.to_instr())
-                        .collect::<Vec<Instruction>>(),
-                },
-            }),
-            Statement::Send { destination, value } => Instruction::Send {
-                to: destination.to_value(),
-                value: value.to_value(),
-            },
-            Statement::If {
-                condition,
-                body,
-                otherwise,
-            } => Instruction::If {
-                cond: condition.to_value(),
-                then: body
-                    .clone()
-                    .into_iter()
-                    .map(|s| s.to_instr())
-                    .collect::<Vec<Instruction>>(),
-                otherwise: otherwise
-                    .clone()
-                    .map(|body| {
-                        body.into_iter()
-                            .map(|s| s.to_instr())
-                            .collect::<Vec<Instruction>>()
-                    })
-                    .unwrap_or(vec![]),
-            },
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -197,49 +135,14 @@ pub enum Expr {
     },
 }
 
-impl Expr {
-    pub fn to_value(&self) -> codegen::Value {
-        match self {
-            Expr::Number(n) => Value::Literal(Literal::Number(*n)),
-            Expr::String(s) => Value::Literal(Literal::String(s.clone())),
-            Expr::Symbol(s) => Value::Variable(s.clone()),
-            Expr::Bool(b) => Value::Literal(Literal::Bool(*b)),
-            Expr::Infix { left, op, right } => {
-                infix_to_value(left.clone(), op.clone(), right.clone())
-            }
-        }
-    }
-}
-
-fn infix_to_value(left: Box<Expr>, op: InfixToken, right: Box<Expr>) -> codegen::Value {
-    let function = match op {
-        InfixToken::Plus => "eval_plus",
-        InfixToken::Minus => "eval_minus",
-        InfixToken::And => "eval_and",
-        InfixToken::Or => "eval_or",
-        InfixToken::GE => "eval_ge",
-        InfixToken::LE => "eval_le",
-        InfixToken::Greater => "eval_greater",
-        InfixToken::Lesser => "eval_lesser",
-        InfixToken::Equal => "eval_eq",
-        InfixToken::Mul => "eval_mul",
-        InfixToken::Div => "eval_div",
-        InfixToken::Assign => panic!("Assigning is not an expression"),
-    };
-
-    Value::Call {
-        function: function.to_string(),
-        args: vec![left.to_value(), right.to_value()],
-    }
-}
-
 pub fn parse(tokens: &[Token]) -> Result<Cst> {
     let mut tokens = tokens;
     let mut actors = Vec::new();
     while !matches!(tokens, [(TokenKind::EOF, _)]) {
         let (actor, rest) = parse_actor(tokens)?;
         let actor = match actor {
-            Statement::Actor(a) => a,
+            Statement::Actor(a) => ActorKind::Actor(a),
+            Statement::Daemon(a) => ActorKind::Daemon(a),
             o => panic!("nonono {o:?} is not an actor"),
         };
         actors.push(actor);
@@ -256,8 +159,16 @@ fn parse_symbol(tokens: &[Token]) -> Result<(String, &[Token])> {
 }
 
 fn parse_actor(tokens: &[Token]) -> Result<(Statement, &[Token])> {
+    let mut kind: Option<Box<dyn Fn(Actor) -> Statement>> = None;
     let tokens = match tokens {
-        [(TokenKind::Actor, _), rest @ ..] => Ok(rest),
+        [(TokenKind::Actor, _), rest @ ..] => {
+            kind = Some(Box::new(|a| Statement::Actor(a)));
+            Ok(rest)
+        }
+        [(TokenKind::Daemon, _), rest @ ..] => {
+            kind = Some(Box::new(|a| Statement::Daemon(a)));
+            Ok(rest)
+        }
         other => end_of_match!(other, TokenKind::Actor),
     }?;
     let (name, tokens) = parse_symbol(tokens)?;
@@ -267,7 +178,7 @@ fn parse_actor(tokens: &[Token]) -> Result<(Statement, &[Token])> {
     let (update, tokens) = parse_updater(tokens)?;
     let (_, tokens) = parse_rbrac(tokens)?;
     Ok((
-        Statement::Actor(Actor {
+        kind.unwrap()(Actor {
             name,
             state: State(state),
             update,

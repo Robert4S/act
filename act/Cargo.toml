@@ -5,4 +5,5 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.5.35", features = ["derive"] }
+cranelift = { version = "0.118.0", features = ["module", "object", "native"] }
 im = "15.1.0"

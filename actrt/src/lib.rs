@@ -32,12 +32,31 @@ pub unsafe extern "C" fn make_actor(rt: &mut RT, init: *const u8, update: *const
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn make_actor_global(init: *const u8, update: *const u8) -> Gc {
+pub unsafe extern "C" fn make_actor_global(
+    init: *const u8,
+    update: *const u8,
+    slot: *mut Gc,
+) -> Gc {
     let mut rt = get_rt().lock().unwrap();
     let init = mem::transmute::<*const u8, Init>(init);
     let update = mem::transmute::<*const u8, Update>(update);
     let pid = rt.make_actor(get_rt(), init, update);
-    rt.make_gc(Value::Pid(pid))
+    let v = rt.make_gc(Value::Pid(pid));
+    *slot = v;
+    rt.make_static(v);
+    v
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn make_daemon(init: *const u8, update: *const u8, slot: *mut Gc) -> Gc {
+    let mut rt = get_rt().lock().unwrap();
+    let init = mem::transmute::<*const u8, Init>(init);
+    let update = mem::transmute::<*const u8, Update>(update);
+    let pid = rt.make_daemon(get_rt(), init, update);
+    let ptr = rt.make_gc(Value::Pid(pid));
+    *slot = ptr;
+    rt.make_static(ptr);
+    ptr
 }
 
 #[no_mangle]
@@ -167,7 +186,6 @@ mod tests {
     }
 
     unsafe extern "C" fn update(rt: &mut RT, arg: Gc, state: Gc) -> Gc {
-        rt.dump_frees();
         let stop_value = make_gc_string(
             rt,
             b"I am done with my work here\0" as *const [u8; 28] as *const i8,
@@ -185,22 +203,39 @@ mod tests {
             let minused = eval_minus(rt, arg, one_for_minus);
             send_actor(rt, FACT, minused);
             let timesd = eval_mul(rt, arg, state);
+            send_actor(rt, PRINTER, timesd);
             return timesd;
         }
     }
 
     #[test]
-    fn start_test() {
+    fn test_factorial() {
         let init = init as *const u8;
         let update = update as *const u8;
-        unsafe {
-            FACT = make_actor_global(init, update);
-        }
 
         unsafe {
-            make_static(FACT);
+            make_actor_global(init, update, &raw mut FACT);
+        }
+
+        let init = init_printer as *const u8;
+        let update = update_printer as *const u8;
+
+        unsafe {
+            make_daemon(init, update, &raw mut PRINTER);
         }
 
         unsafe { start_runtime() };
+    }
+
+    static mut PRINTER: Gc = Gc { ptr: 0 };
+
+    unsafe extern "C" fn init_printer(rt: &mut RT) -> Gc {
+        make_gc_number(rt, -1.)
+    }
+
+    unsafe extern "C" fn update_printer(rt: &mut RT, state: Gc, arg: Gc) -> Gc {
+        let arg_val = rt.deref_gc(&arg);
+        println!("{:?}", arg_val);
+        state
     }
 }

@@ -1,0 +1,316 @@
+   Compiling act v0.1.0 (/home/robert/code/rust/act-comb/act)
+warning: unused variable: `asm_file`
+  --> src/main.rs:24:9
+   |
+24 |     let asm_file = format!("{stem}.S");
+   |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_asm_file`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `instructions`
+  --> src/main.rs:39:9
+   |
+39 |     let instructions = cst::gen_instructions(tree.clone());
+   |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_instructions`
+
+warning: type alias `EmitError` is never used
+ --> src/codegen.rs:4:6
+  |
+4 | type EmitError = String;
+  |      ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: type alias `Result` is never used
+ --> src/codegen.rs:5:6
+  |
+5 | type Result<T> = core::result::Result<T, EmitError>;
+  |      ^^^^^^
+
+warning: function `merge` is never used
+ --> src/codegen.rs:7:4
+  |
+7 | fn merge<K: Clone, V: Clone>(map1: &mut HashMap<K, V>, map2: &HashMap<K, V>) -> ()
+  |    ^^^^^
+
+warning: fields `arg` and `body` are never read
+  --> src/codegen.rs:18:9
+   |
+17 | pub struct Update {
+   |            ------ fields in this struct
+18 |     pub arg: String,
+   |         ^^^
+19 |     pub body: Vec<Instruction>,
+   |         ^^^^
+   |
+   = note: `Update` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: field `body` is never read
+  --> src/codegen.rs:24:9
+   |
+23 | pub struct Init {
+   |            ---- field in this struct
+24 |     pub body: Vec<Instruction>,
+   |         ^^^^
+   |
+   = note: `Init` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: fields `name`, `state_name`, `update`, and `init` are never read
+  --> src/codegen.rs:29:9
+   |
+28 | pub struct Actor {
+   |            ----- fields in this struct
+29 |     pub name: String,
+   |         ^^^^
+30 |     pub state_name: String,
+   |         ^^^^^^^^^^
+31 |     pub update: Update,
+   |         ^^^^^^
+32 |     pub init: Init,
+   |         ^^^^
+   |
+   = note: `Actor` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: fields `name` and `value` are never read
+  --> src/codegen.rs:38:9
+   |
+37 |     Assignment {
+   |     ---------- fields in this variant
+38 |         name: String,
+   |         ^^^^
+39 |         value: Value,
+   |         ^^^^^
+   |
+   = note: `Instruction` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: fields `to` and `value` are never read
+  --> src/codegen.rs:42:9
+   |
+41 |     Send {
+   |     ---- fields in this variant
+42 |         to: Value,
+   |         ^^
+43 |         value: Value,
+   |         ^^^^^
+   |
+   = note: `Instruction` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: field `0` is never read
+  --> src/codegen.rs:45:11
+   |
+45 |     Actor(Actor),
+   |     ----- ^^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `Instruction` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+45 |     Actor(()),
+   |           ~~
+
+warning: field `0` is never read
+  --> src/codegen.rs:46:12
+   |
+46 |     Daemon(Actor),
+   |     ------ ^^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `Instruction` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+46 |     Daemon(()),
+   |            ~~
+
+warning: field `0` is never read
+  --> src/codegen.rs:47:12
+   |
+47 |     Return(Value),
+   |     ------ ^^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `Instruction` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+47 |     Return(()),
+   |            ~~
+
+warning: fields `cond`, `then`, and `otherwise` are never read
+  --> src/codegen.rs:49:9
+   |
+48 |     If {
+   |     -- fields in this variant
+49 |         cond: Value,
+   |         ^^^^
+50 |         then: Vec<Instruction>,
+   |         ^^^^
+51 |         otherwise: Vec<Instruction>,
+   |         ^^^^^^^^^
+   |
+   = note: `Instruction` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: function `align_call` is never used
+  --> src/codegen.rs:55:4
+   |
+55 | fn align_call() -> String {
+   |    ^^^^^^^^^^
+
+warning: method `to_code` is never used
+  --> src/codegen.rs:60:8
+   |
+59 | impl Instruction {
+   | ---------------- method in this implementation
+60 |     fn to_code(&self, context: &mut Context, is_toplevel: bool) -> Result<String> {
+   |        ^^^^^^^
+
+warning: field `0` is never read
+  --> src/codegen.rs:92:14
+   |
+92 |     Variable(String),
+   |     -------- ^^^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `Value` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+92 |     Variable(()),
+   |              ~~
+
+warning: field `0` is never read
+  --> src/codegen.rs:93:13
+   |
+93 |     Literal(Literal),
+   |     ------- ^^^^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `Value` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+93 |     Literal(()),
+   |             ~~
+
+warning: fields `function` and `args` are never read
+  --> src/codegen.rs:94:12
+   |
+94 |     Call { function: String, args: Vec<Value> },
+   |     ----   ^^^^^^^^          ^^^^
+   |     |
+   |     fields in this variant
+   |
+   = note: `Value` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: struct `Context` is never constructed
+   --> src/codegen.rs:121:12
+    |
+121 | pub struct Context {
+    |            ^^^^^^^
+    |
+    = note: `Context` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: enum `Address` is never used
+   --> src/codegen.rs:133:6
+    |
+133 | enum Address {
+    |      ^^^^^^^
+
+warning: function `get_align` is never used
+   --> src/codegen.rs:138:4
+    |
+138 | fn get_align(literal: &Literal) -> usize {
+    |    ^^^^^^^^^
+
+warning: multiple associated items are never used
+   --> src/codegen.rs:147:12
+    |
+146 | impl Context {
+    | ------------ associated items in this implementation
+147 |     pub fn new() -> Self {
+    |            ^^^
+...
+162 |     fn merge(&mut self, other: &Context) {
+    |        ^^^^^
+...
+168 |     fn setlabel(&mut self, label: &str) -> String {
+    |        ^^^^^^^^
+...
+174 |     fn gen_block(&mut self, block: Vec<Instruction>) -> Result<String> {
+    |        ^^^^^^^^^
+...
+183 |     fn gen_actor(&mut self, actor: Actor, is_toplevel: bool, is_daemon: bool) -> Result<String> {
+    |        ^^^^^^^^^
+...
+277 |     fn gen_if(
+    |        ^^^^^^
+...
+330 |     fn get_var(&self, name: &str) -> Address {
+    |        ^^^^^^^
+...
+334 |     pub fn to_code(&mut self, instructions: Vec<Instruction>) -> Result<String> {
+    |            ^^^^^^^
+...
+414 |     fn make_literal(&mut self, literal: Literal) -> (String, Location) {
+    |        ^^^^^^^^^^^^
+...
+447 |     fn load_rt(&mut self) -> String {
+    |        ^^^^^^^
+...
+465 |     fn eval_into(&mut self, value: Value, dest: Location) -> Result<String> {
+    |        ^^^^^^^^^
+...
+519 |     fn get_variable(&mut self, name: String) -> Result<Location> {
+    |        ^^^^^^^^^^^^
+...
+528 |     fn mv(&mut self, source: Location, dest: Location) -> String {
+    |        ^^
+...
+553 |     fn allocate_space(&mut self, name: String) -> usize {
+    |        ^^^^^^^^^^^^^^
+...
+560 |     fn assign_var(&mut self, name: String, register: Register, global: bool) -> String {
+    |        ^^^^^^^^^^
+
+warning: enum `Location` is never used
+   --> src/codegen.rs:579:6
+    |
+579 | enum Location {
+    |      ^^^^^^^^
+
+warning: methods `is_simd_register`, `as_gas_text`, and `is_memory` are never used
+   --> src/codegen.rs:586:8
+    |
+585 | impl Location {
+    | ------------- methods in this implementation
+586 |     fn is_simd_register(&self) -> bool {
+    |        ^^^^^^^^^^^^^^^^
+...
+593 |     fn as_gas_text(&self) -> String {
+    |        ^^^^^^^^^^^
+...
+602 |     fn is_memory(&self) -> bool {
+    |        ^^^^^^^^^
+
+warning: method `is_simd` is never used
+   --> src/codegen.rs:651:8
+    |
+650 | impl Register {
+    | ------------- method in this implementation
+651 |     fn is_simd(&self) -> bool {
+    |        ^^^^^^^
+
+warning: field `name` is never read
+  --> src/cranegen.rs:86:5
+   |
+85 | struct Actor {
+   |        ----- field in this struct
+86 |     name: String,
+   |     ^^^^
+   |
+   = note: `Actor` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: `act` (bin "act") generated 27 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.94s
+     Running `target/debug/act --file factorial.act`
