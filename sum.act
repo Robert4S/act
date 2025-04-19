@@ -9,9 +9,8 @@ Actor summing {
 	Update (num) {
 		if (num <= 0) {
 			return sum;
-		} else {
-			send(summing, num - 1);
-			return num + sum;
 		};
+		send(summing, num - 1);
+		return num + sum;
 	}
 }

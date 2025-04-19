@@ -1,6 +1,5 @@
 Actor factorial {
         State accumulator;
-	
 	Initialiser {
             send(factorial, 8);
             return 1;
@@ -9,9 +8,8 @@ Actor factorial {
         Update (message) {
             if (message <= 1) {
                 return "I am done with my work here";
-            } else {
-                send(factorial, message - 1);
-                return message * accumulator;
             };
+            send(factorial, message - 1);
+            return message * accumulator;
 	}
 }

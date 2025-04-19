@@ -4,7 +4,6 @@ use cst::Cst;
 use std::{env, fs, path::PathBuf, process::Command, str::FromStr};
 
 use tokenise::tokenize_all;
-//mod codegen;
 mod cst;
 
 mod cranegen;
@@ -24,48 +23,57 @@ struct Args {
 }
 
 fn main() {
-    let args = Args::parse();
-    let path = PathBuf::from_str(&args.file).unwrap();
-    let stem = path.file_stem().unwrap().to_string_lossy();
-    //let asm_file = format!("{stem}.S");
-    let extension = path.extension().unwrap().to_string_lossy();
+    if let Err(e) = compile() {
+        println!("{e}");
+    }
+}
 
-    assert!(
-        &extension == "act",
-        "Input file must have extenstion 'act', passed file has extension '{extension}'"
-    );
+fn compile() -> Result<(), String> {
+    let args = Args::parse();
+    let path = PathBuf::from_str(&args.file).map_err(|_| "Could not parse file name")?;
+    let stem = path
+        .file_stem()
+        .ok_or("Could not get file stem from given file name")?
+        .to_string_lossy();
+    let extension = path
+        .extension()
+        .ok_or("Could not get file extension from given file name")?
+        .to_string_lossy();
+
+    if &extension != "act" {
+        Err("Input file must have extenstion 'act', passed file has extension '{extension}'")?
+    }
 
     let input: Vec<char> = fs::read_to_string(&path)
         .expect(&format!("No such file {}", &args.file))
         .chars()
         .collect();
 
-    let tokenised = tokenize_all(input.as_slice()).expect("Error tokenising");
-    let tree = cst::parse(&tokenised).expect("Error parsing");
-    //let instructions = cst::gen_instructions(tree.clone());
+    let tokenised = tokenize_all(input.as_slice()).ok_or("Error tokenising")?;
+    let tree = cst::parse(&tokenised).map_err(|e| format!("Error parsing: {e:?}"))?;
 
-    gen_cranelift(tree, args.debug, &format!("{stem}.o"));
-
-    //let mut x = codegen::Context::new();
-    //let s = x.to_code(instructions).expect("Codegen error");
+    gen_cranelift(tree, args.debug, &format!("{stem}.o"))?;
 
     let home = env::var("HOME").unwrap();
 
-    //fs::write(&asm_file, s).unwrap();
     Command::new("gcc")
         .arg("-o")
         .arg(stem.to_string())
         .arg(&format!("{stem}.o"))
         .arg(format!("{home}/.local/lib/libactrt.a"))
         .spawn()
-        .expect("It seems you do not have GCC installed");
+        .map_err(|_| "It seems you do not have GCC installed".to_string())
+        .map(|_| ())
 }
 
-fn gen_cranelift(instrs: Cst, debug: bool, name: &str) {
+fn gen_cranelift(instrs: Cst, debug: bool, name: &str) -> Result<(), String> {
     let mut compiler = Compiler::default();
 
     compiler.debug = debug;
 
-    compiler.compile(instrs).unwrap();
+    compiler
+        .compile(instrs)
+        .map_err(|e| format!("Code generation error: {}", e.to_string()))?;
     compiler.finish(name);
+    Ok(())
 }

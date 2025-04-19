@@ -25,6 +25,7 @@ pub enum TokenKind {
     If,
     Else,
     Daemon,
+    Intrinsic,
 
     // Rules
     Infix(InfixToken),
@@ -182,13 +183,29 @@ fn tokenise_symbol<'a>(input: &'a [char], line_number: usize) -> Option<(Token, 
 fn tokenise_string<'a>(input: &'a [char], line_number: usize) -> Option<(Token, Vec<char>)> {
     let mut input = input;
     let mut s = "".to_string();
+    let mut escaped = false;
 
     while let [c, rest @ ..] = input {
-        if *c == '"' {
+        if escaped {
+            match c {
+                'n' => s.push('\n'),
+                't' => s.push('\t'),
+                'r' => s.push('\r'),
+                '\\' => s.push('\\'),
+                '"' => s.push('"'),
+                other => s.push(*other), // Handle unknown escape sequences as literal characters
+            }
+            escaped = false;
+            input = rest;
+        } else if *c == '"' {
             return Some(((TokenKind::String(s), line_number), rest.to_vec()));
+        } else if *c == '\\' {
+            escaped = true;
+            input = rest
+        } else {
+            s.push(*c);
+            input = rest;
         }
-        s.push(*c);
-        input = rest;
     }
     None
 }
@@ -209,6 +226,7 @@ fn update_keyword(token: Token) -> Token {
                 "State" => TokenKind::State,
                 "if" => TokenKind::If,
                 "else" => TokenKind::Else,
+                "intrinsic" => TokenKind::Intrinsic,
                 _ => TokenKind::Symbol(s),
             },
             n,

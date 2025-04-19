@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, fs::File, io::Write};
+use std::{collections::BTreeSet, convert::identity, fs::File, io::Write, iter};
 
 use codegen::{ir::immediates::Offset32, write_function};
 use cranelift::{
@@ -212,15 +212,13 @@ impl Compiler {
             .unwrap();
 
         self.module.define_function(init_id, &mut self.ctx).unwrap();
-        if self.debug {
-            let mut s = String::new();
-            write_function(&mut s, &self.ctx.func).unwrap();
-            println!("INIT:\n{s}");
-        }
 
         self.ctx.clear();
         self.ctx.func.signature.call_conv = CallConv::SystemV;
 
+        if self.debug {
+            println!("UPDATE:");
+        }
         self.translate(
             vec![
                 String::from("RUNTIME"),
@@ -244,12 +242,6 @@ impl Compiler {
             .define_function(update_id, &mut self.ctx)
             .unwrap();
 
-        if self.debug {
-            let mut s = String::new();
-            write_function(&mut s, &self.ctx.func).unwrap();
-            println!("UPDATE:\n{s}");
-        }
-
         self.ctx.clear();
         self.ctx.func.signature.call_conv = CallConv::SystemV;
 
@@ -269,6 +261,9 @@ impl Compiler {
     }
 
     fn start_prog(&mut self) -> Result<(), ModuleError> {
+        if self.debug {
+            println!("MAIN:");
+        }
         let int = self.module.target_config().pointer_type();
         self.ctx.func.signature.call_conv = CallConv::SystemV;
         self.ctx.func.signature.returns.push(AbiParam::new(int));
@@ -333,6 +328,11 @@ impl Compiler {
         let zero = trans.builder.ins().iconst(int, 0);
         trans.builder.ins().return_(&[zero]);
 
+        if self.debug {
+            let mut s = String::new();
+            write_function(&mut s, &trans.builder.func).unwrap();
+            println!("{s}");
+        }
         // Tell the builder we're done with this function.
         trans.builder.finalize();
 
@@ -395,13 +395,15 @@ impl Compiler {
             ret_block,
         };
 
-        for stmt in stmts {
-            trans.translate_stmt(stmt);
-        }
+        let _ = stmts
+            .into_iter()
+            .map(|s| trans.translate_stmt(s))
+            .any(identity);
 
         trans
             .builder
             .append_block_params_for_function_returns(ret_block);
+
         trans.builder.switch_to_block(ret_block);
         let ret_param = trans.builder.block_params(ret_block)[0];
 
@@ -414,6 +416,12 @@ impl Compiler {
         //trans.builder.ins().jump(ret_block, &[return_value]);
 
         // Tell the builder we're done with this function.
+        if self.debug {
+            let mut s = String::new();
+            write_function(&mut s, &trans.builder.func).unwrap();
+            println!("{s}");
+        }
+
         trans.builder.finalize();
         Ok(())
     }
@@ -558,6 +566,7 @@ impl<'a> FunctionTranslator<'a> {
                     }
                     else_terminated
                 } else {
+                    self.builder.ins().jump(block_merge, &[]);
                     false
                 };
 
@@ -565,6 +574,14 @@ impl<'a> FunctionTranslator<'a> {
                 self.builder.seal_block(block_merge);
 
                 then_terminated && else_terminated
+            }
+            Statement::Intrinsic { func_name, args } => {
+                let rt = self.translate_expr(Expr::Symbol("RUNTIME".to_string()));
+                let other_args = args.into_iter().map(|arg| self.translate_expr(arg));
+                let args = iter::once(rt).chain(other_args).collect();
+
+                let _ = self.translate_call(func_name, args);
+                false
             }
         }
     }

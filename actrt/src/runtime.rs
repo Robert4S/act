@@ -8,6 +8,7 @@ use std::{
         Arc, Mutex,
     },
     thread::{self, yield_now, JoinHandle},
+    usize,
 };
 
 enum GcResult {
@@ -20,7 +21,7 @@ pub type Init = extern "C" fn(&mut RT) -> Gc;
 pub type Update = extern "C" fn(&mut RT, Gc, Gc) -> Gc;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct Pid(usize);
+pub struct Pid(pub usize);
 
 #[derive(Debug, Clone)]
 struct RTActor {
@@ -123,15 +124,24 @@ impl RT {
         Gc { ptr }
     }
 
+    fn static_pid(&self, pid: &Pid) -> Option<usize> {
+        self.statics
+            .iter()
+            .enumerate()
+            .map(|(idx, c)| (idx, self.deref_gc(c)))
+            .filter(|(_, v)| match v {
+                Value::Pid(p) => p.0 == pid.0,
+                _ => false,
+            })
+            .next()
+            .map(|(idx, _)| idx)
+    }
+
     pub fn mark_actor(&self, pid: &Pid) -> Vec<Gc> {
         let state = self
             .actors
             .get(pid)
-            .unwrap_or_else(|| {
-                self.daemons
-                    .get(pid)
-                    .expect(&format!("Cant find pid {pid:?}"))
-            })
+            .unwrap_or_else(|| self.daemons.get(pid).expect(&format!("Cant find {pid:?}")))
             .state;
         let mut from_state = state.mark(self);
 
@@ -153,6 +163,7 @@ impl RT {
         } else {
             Arc::new(AtomicBool::new(false))
         };
+
         let handler = thread::spawn(move || Self::run_actor(pid, &rt, kill_yourself));
         if is_daemon {
             self.handlers.insert(pid, handler);
@@ -350,19 +361,17 @@ impl RT {
             }
             self.mailboxes.remove(&pid);
             self.handlers.remove(&pid);
+            if let Some(idx) = self.static_pid(&pid) {
+                self.statics.remove(idx);
+            }
         }
 
-        if self.actors.is_empty() {
-            self.end_runtime();
-            return true;
-        }
+        let actors_empty = self.actors.is_empty();
 
         let mailboxes_empty =
             self.all_initialised() && self.mailboxes.values().all(VecDeque::is_empty);
 
-        if !mailboxes_empty {
-            false
-        } else {
+        if actors_empty && mailboxes_empty {
             self.mailboxes.keys().for_each(|pid| {
                 println!(
                     "PID {} finished with {:?}",
@@ -371,8 +380,9 @@ impl RT {
                 )
             });
             self.end_runtime();
-            true
         }
+
+        actors_empty && mailboxes_empty
     }
 
     fn end_runtime(&mut self) {

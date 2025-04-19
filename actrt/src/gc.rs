@@ -1,5 +1,5 @@
 use core::panic;
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, usize};
 
 use super::runtime::{Pid, RT};
 
@@ -69,6 +69,9 @@ pub enum Undefined {
 
 impl Gc {
     pub fn mark(&self, runtime: &RT) -> Vec<Gc> {
+        if self.ptr == usize::MAX {
+            return vec![];
+        }
         let value = runtime.deref_gc(self).clone();
         let mut value_marked = value.mark(runtime);
         value_marked.push(self.clone());
@@ -77,6 +80,21 @@ impl Gc {
 }
 
 impl Value {
+    pub fn to_string(&self, runtime: &RT) -> String {
+        match self {
+            Value::Number(n) => n.to_string(),
+            Value::String(s) => s.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::List(vec) => format!(
+                "{:?}",
+                vec.iter()
+                    .map(|g| runtime.deref_gc(g).to_string(runtime))
+                    .collect::<Vec<_>>()
+            ),
+            Value::Pid(pid) => format!("PID({})", &pid.0),
+            Value::Undefined(_) => "Undefined".to_string(),
+        }
+    }
     pub fn mark(&self, runtime: &RT) -> Vec<Gc> {
         match self {
             Self::Number(_) => vec![],
@@ -118,7 +136,7 @@ pub struct Gc {
 }
 
 impl Gc {
-    pub fn new(val: Value, runtime: &mut RT) -> Self {
+    pub fn new(val: Value, runtime: &RT) -> Self {
         runtime.make_gc(val)
     }
 
@@ -126,7 +144,7 @@ impl Gc {
         self.ptr
     }
 
-    pub fn eval_ge(&self, rhs: Self, runtime: &mut RT) -> Gc {
+    pub fn eval_ge(&self, rhs: Self, runtime: &RT) -> Gc {
         let v1: &Value = runtime.deref_gc(self);
         let v2: &Value = runtime.deref_gc(&rhs);
 
@@ -136,7 +154,7 @@ impl Gc {
         }
     }
 
-    pub fn eval_greater(&self, rhs: Self, runtime: &mut RT) -> Gc {
+    pub fn eval_greater(&self, rhs: Self, runtime: &RT) -> Gc {
         let v1: &Value = runtime.deref_gc(self);
         let v2: &Value = runtime.deref_gc(&rhs);
 
@@ -146,7 +164,7 @@ impl Gc {
         }
     }
 
-    pub fn eval_le(&self, rhs: Self, runtime: &mut RT) -> Gc {
+    pub fn eval_le(&self, rhs: Self, runtime: &RT) -> Gc {
         let v1: &Value = runtime.deref_gc(self);
         let v2: &Value = runtime.deref_gc(&rhs);
 
@@ -156,7 +174,7 @@ impl Gc {
         }
     }
 
-    pub fn eval_lesser(&self, rhs: Self, runtime: &mut RT) -> Gc {
+    pub fn eval_lesser(&self, rhs: Self, runtime: &RT) -> Gc {
         let v1: &Value = runtime.deref_gc(self);
         let v2: &Value = runtime.deref_gc(&rhs);
 
@@ -166,7 +184,7 @@ impl Gc {
         }
     }
 
-    pub fn eval_and(&self, rhs: Self, runtime: &mut RT) -> Gc {
+    pub fn eval_and(&self, rhs: Self, runtime: &RT) -> Gc {
         let v1: &Value = runtime.deref_gc(self);
         let v2: &Value = runtime.deref_gc(&rhs);
 
@@ -176,7 +194,7 @@ impl Gc {
         }
     }
 
-    pub fn eval_or(&self, rhs: Self, runtime: &mut RT) -> Gc {
+    pub fn eval_or(&self, rhs: Self, runtime: &RT) -> Gc {
         let v1: &Value = runtime.deref_gc(self);
         let v2: &Value = runtime.deref_gc(&rhs);
 
@@ -186,14 +204,14 @@ impl Gc {
         }
     }
 
-    pub fn eval_eq(&self, rhs: Self, runtime: &mut RT) -> Gc {
+    pub fn eval_eq(&self, rhs: Self, runtime: &RT) -> Gc {
         let v1: &Value = runtime.deref_gc(self);
         let v2: &Value = runtime.deref_gc(&rhs);
 
         Gc::new(Value::Bool(v1.equals(v2, runtime)), runtime)
     }
 
-    pub fn eval_add(self, rhs: Self, runtime: &mut RT) -> Gc {
+    pub fn eval_add(self, rhs: Self, runtime: &RT) -> Gc {
         let v1: &Value = runtime.deref_gc(&self);
         let v2: &Value = runtime.deref_gc(&rhs);
 
@@ -203,7 +221,7 @@ impl Gc {
         }
     }
 
-    pub fn eval_sub(self, rhs: Self, runtime: &mut RT) -> Gc {
+    pub fn eval_sub(self, rhs: Self, runtime: &RT) -> Gc {
         let v1: &Value = runtime.deref_gc(&self);
         let v2: &Value = runtime.deref_gc(&rhs);
 
@@ -213,7 +231,7 @@ impl Gc {
         }
     }
 
-    pub fn eval_mul(self, rhs: Self, runtime: &mut RT) -> Gc {
+    pub fn eval_mul(self, rhs: Self, runtime: &RT) -> Gc {
         let v1: &Value = runtime.deref_gc(&self);
         let v2: &Value = runtime.deref_gc(&rhs);
 
@@ -223,7 +241,7 @@ impl Gc {
         }
     }
 
-    pub fn eval_div(self, rhs: Self, runtime: &mut RT) -> Gc {
+    pub fn eval_div(self, rhs: Self, runtime: &RT) -> Gc {
         let v1: &Value = runtime.deref_gc(&self);
         let v2: &Value = runtime.deref_gc(&rhs);
 

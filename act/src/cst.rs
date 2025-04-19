@@ -44,7 +44,10 @@ impl Debug for ParseError {
             } => {
                 let mut remaining = remaining.clone();
                 let line_num = remaining.pop_front().map(|(_, l)| l).unwrap_or(0);
-                write!(f, "Line {line_num}: Expected {expected:?}, got {got:?}")
+                write!(
+                    f,
+                    "Line {line_num}: Expected TOKEN({expected:?}), got TOKEN({got:?})"
+                )
             }
             Self::NoRuleMatch {
                 expected,
@@ -52,7 +55,10 @@ impl Debug for ParseError {
             } => {
                 let mut remaining = remaining.clone();
                 let line_num = remaining.pop_front().map(|(_, l)| l).unwrap_or(0);
-                write!(f, "Line {line_num}: Expected the rule {expected}, but could not match any patterns")
+                write!(
+                    f,
+                    "Line {line_num}: Expected RULE({expected}), but could not match any patterns"
+                )
             }
         }
     }
@@ -102,6 +108,10 @@ pub struct Initialiser {
 #[derive(Debug, Clone)]
 pub enum Statement {
     Assignment(Assignment),
+    Intrinsic {
+        func_name: String,
+        args: Vec<Expr>,
+    },
     Return(Expr),
     Actor(Actor),
     Daemon(Actor),
@@ -237,21 +247,27 @@ fn parse_initialiser(tokens: &[Token]) -> Result<(Initialiser, &[Token])> {
     }
 }
 
+fn parse_semi(tokens: &[Token]) -> Result<&[Token]> {
+    match tokens {
+        [(TokenKind::Semi, _), rest @ ..] => Ok(rest),
+        other => end_of_match!(other, TokenKind::Semi),
+    }
+}
+
 fn parse_statement_block(tokens: &[Token]) -> Result<(Vector<Statement>, &[Token])> {
     let (_, tokens) = parse_lbrac(tokens)?;
     let mut statements = Vec::new();
-    let mut input = tokens;
-    while let (statement, [(TokenKind::Semi, _), rest @ ..]) = parse_statement(input)? {
+    let mut tokens = tokens;
+    while !matches!(tokens, [(TokenKind::Rbrac, _), ..]) {
+        let (statement, rest) = parse_statement(tokens)?;
+        let rest = parse_semi(rest)?;
         statements.push(statement);
-        input = rest;
-        if let Ok(_) = parse_rbrac(input) {
-            break;
-        }
+        tokens = rest;
     }
+    let (_, tokens) = parse_rbrac(tokens)?;
 
-    let (_, input) = parse_rbrac(input)?;
     let statements = statements.into_iter().collect();
-    Ok((statements, input))
+    Ok((statements, tokens))
 }
 
 fn parse_statement(tokens: &[Token]) -> Result<(Statement, &[Token])> {
@@ -261,6 +277,7 @@ fn parse_statement(tokens: &[Token]) -> Result<(Statement, &[Token])> {
         parse_return,
         parse_send,
         parse_if,
+        parse_intrinsic,
     ];
 
     fns.iter()
@@ -301,6 +318,38 @@ fn parse_if_literal(tokens: &[Token]) -> Result<((), &[Token])> {
     match tokens {
         [(TokenKind::If, _), rest @ ..] => Ok(((), rest)),
         other => end_of_match!(other, TokenKind::If),
+    }
+}
+
+fn parse_intrinsic(tokens: &[Token]) -> Result<(Statement, &[Token])> {
+    let tokens = parse_intrinsic_literal(tokens)?;
+    let (_, tokens) = parse_lparen(tokens)?;
+    let (func_name, tokens) = parse_symbol(tokens)?;
+    let (_, tokens) = parse_comma(tokens)?;
+    let (args, tokens) = parse_intrinsic_tail(tokens)?;
+
+    Ok((Statement::Intrinsic { func_name, args }, tokens))
+}
+
+fn parse_intrinsic_tail(tokens: &[Token]) -> Result<(Vec<Expr>, &[Token])> {
+    let (e, tokens) = parse_expr(tokens)?;
+    let mut exprs = vec![e];
+    let mut tokens = tokens;
+    while !matches!(tokens, [(TokenKind::Rparen, _), ..]) {
+        let (_, rest) = parse_comma(tokens)?;
+        let (e, rest) = parse_expr(rest)?;
+        tokens = rest;
+        exprs.push(e);
+    }
+    let (_, tokens) = parse_rparen(tokens)?;
+
+    Ok((exprs, tokens))
+}
+
+fn parse_intrinsic_literal(tokens: &[Token]) -> Result<&[Token]> {
+    match tokens {
+        [(TokenKind::Intrinsic, _), rest @ ..] => Ok(rest),
+        other => end_of_match!(other, TokenKind::Intrinsic),
     }
 }
 
@@ -423,18 +472,7 @@ fn parse_updater(tokens: &[Token]) -> Result<(Update, &[Token])> {
             let (_, tokens) = parse_lparen(tokens)?;
             let (arg, tokens) = parse_symbol(tokens)?;
             let (_, tokens) = parse_rparen(tokens)?;
-            let (_, tokens) = parse_lbrac(tokens)?;
-            let mut statements = Vec::new();
-            let mut tokens = tokens;
-            while let (statement, [(TokenKind::Semi, _), rest @ ..]) = parse_statement(tokens)? {
-                statements.push(statement);
-                tokens = rest;
-                if let Ok(_) = parse_rbrac(tokens) {
-                    break;
-                }
-            }
-            let (_, tokens) = parse_rbrac(tokens)?;
-            let statements = statements.into_iter().collect::<Vector<Statement>>();
+            let (statements, tokens) = parse_statement_block(tokens)?;
             Ok((
                 Update {
                     inp_name: arg.clone(),
