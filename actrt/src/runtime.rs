@@ -2,7 +2,7 @@ use rayon::{current_num_threads, prelude::*};
 
 use super::gc::{Allocator, Gc, Value};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     process::exit,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -19,7 +19,7 @@ enum ActorState {
     Init(Gc),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
 pub struct Pid(pub usize);
 
 #[derive(Debug, Clone)]
@@ -71,6 +71,13 @@ struct Mailboxes {
 }
 
 impl Mailboxes {
+    fn new() -> Self {
+        Self {
+            boxes: HashMap::new(),
+            queue: VecDeque::new(),
+        }
+    }
+
     fn push_message(&mut self, pid: Pid, val: Gc) {
         self.boxes.get_mut(&pid).unwrap().push_back(val);
         self.queue.push_back(pid);
@@ -103,14 +110,30 @@ impl Mailboxes {
     fn is_empty(&self) -> bool {
         self.boxes.values().all(VecDeque::is_empty)
     }
-}
 
-impl Mailboxes {
-    fn new() -> Self {
-        Self {
-            boxes: HashMap::new(),
-            queue: VecDeque::new(),
+    fn pop_messages(&mut self, num: usize) -> Vec<(Pid, Gc)> {
+        let mut already_popped = BTreeSet::new();
+        let mut reinsert = Vec::new();
+        let mut popped = Vec::new();
+
+        while popped.len() <= num {
+            if let Some((pid, message)) = self.pop_message() {
+                if already_popped.contains(&pid) {
+                    reinsert.push((pid, message));
+                } else {
+                    popped.push((pid, message));
+                    already_popped.insert(pid);
+                }
+            } else {
+                break;
+            }
         }
+
+        while let Some((pid, message)) = reinsert.pop() {
+            self.push_message(pid, message);
+        }
+
+        popped
     }
 }
 
@@ -176,9 +199,14 @@ impl RT {
         loop {
             let _ = rt.epoch.fetch_add(1, Ordering::SeqCst);
 
-            let _new_states: Vec<Gc> = (0..current_num_threads().max(4))
-                .filter_map(|_| rt.mailboxes.lock().unwrap().pop_message())
-                .par_bridge()
+            // TODO: Make sure an actor does not get more than one message to respond to in each
+            // scheduling epoch
+            let mut mailboxes = rt.mailboxes.lock().unwrap();
+            let messages = mailboxes.pop_messages(current_num_threads());
+
+            drop(mailboxes);
+
+            let _new_states: Vec<Gc> = messages
                 .into_par_iter()
                 .map({
                     let rt_clone = rt.clone();
@@ -225,21 +253,22 @@ impl RT {
 
 impl RT {
     fn destruct(&self) {
-        let actors = self.actors.lock().unwrap();
-        let states: Vec<(Pid, Value)> = actors
-            .iter()
-            .map(|(pid, actor)| (pid.clone(), self.deref_gc(&actor.ensure_init()).clone()))
-            .collect();
+        ()
+        //let actors = self.actors.lock().unwrap();
+        //let states: Vec<(Pid, Value)> = actors
+        //    .iter()
+        //    .map(|(pid, actor)| (pid.clone(), self.deref_gc(&actor.ensure_init()).clone()))
+        //    .collect();
 
-        drop(actors);
+        //drop(actors);
 
-        for (pid, final_state) in states {
-            println!(
-                "PID({}) finished with {}",
-                pid.0,
-                final_state.to_string(self)
-            );
-        }
+        //for (pid, final_state) in states {
+        //    println!(
+        //        "PID({}) finished with {}",
+        //        pid.0,
+        //        final_state.to_string(self)
+        //    );
+        //}
     }
 
     fn update_actor(&self, pid: Pid, message: Gc) -> Gc {

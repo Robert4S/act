@@ -6,8 +6,15 @@ Actor factorial {
         }
 
         Update (message) {
-	    send(print, accumulator);
+	    # intrinsic(print_value, "Arg: ");
+	    # intrinsic(print_value, message);
+	    # intrinsic(print_value, "\n");
+
             if (message <= 1) {
+	        intrinsic(print_value, " Accumulator: ");
+	        intrinsic(print_value, accumulator);
+	        intrinsic(print_value, "\n");
+
                 return accumulator;
             };
             send(factorial, message - 1);

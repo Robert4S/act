@@ -76,6 +76,17 @@ pub fn tokenize<'a>(input: &'a [char], line_number: usize) -> Option<(Token, Vec
         ['}', rest @ ..] => Some(((TokenKind::Rbrac, line_number), rest.to_owned())),
         [',', rest @ ..] => Some(((TokenKind::Comma, line_number), rest.to_owned())),
         [';', rest @ ..] => Some(((TokenKind::Semi, line_number), rest.to_owned())),
+        ['#', rest @ ..] => {
+            let mut toks = rest;
+            loop {
+                match toks {
+                    ['\n', ..] => break,
+                    [_, rest @ ..] => toks = rest,
+                    _ => break,
+                }
+            }
+            tokenize(toks, line_number)
+        }
 
         // Lookahead rules
         ['"', rest @ ..] => tokenise_string(rest, line_number),

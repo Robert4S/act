@@ -8,6 +8,8 @@ Actor summing {
 
 	Update (num) {
 		if (num <= 0) {
+			intrinsic(print_value, sum);
+			intrinsic(print_value, "\n");
 			return sum;
 		};
 		send(summing, num - 1);
