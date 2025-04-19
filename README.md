@@ -14,23 +14,26 @@ The Initialiser and Updater functions for actors are collections of statements. 
 ### If condition
 Consists of a boolean value, a branch to follow if the boolean is true, and optionally, a branch to follow if it is not true. Each of these branches are also collections of statements.
 #### Syntax:
+```
 if (condition) { \
     (statements) \
 } else { \
     (statements) \
-}; \
+};
+```
 *Note:* If statements must be followed by a semicolon, just like any other statement
 ### Assignment
 Assignments are for assigning the value of the expression on the right hand side to the variable name on the left hand side
 #### Syntax:
-variable_name = expression;
+`variable_name = expression`
 ### Send
 An actor can send a value as a message to another actor, and this message will be added to the other actor's message queue. Any expression can be sent as a message
 #### Syntax:
-send(actor, message), where the first argument expression will be validated to be a process ID at runtime
+`send(actor, message)`, where the first argument expression will be validated to be a process ID at runtime
 ### Actor creation statement
 Actors can create other actors dynamically, and the name used for the creation of this actor will become a variable with the value of the spawned actor's PID.
 #### Syntax:
+```
 Actor my_actor { \
     State state_name; \
 \
@@ -42,6 +45,7 @@ Actor my_actor { \
         (statements) \
     } \
 }
+```
 ### Intrinsic statement
 This provides a way for actors to sequentially call rust functions that must be linked in to the emitted object file. The arguments given to the intrinsic must be the unmangled name of the stub to be called, and a list of runtime values to be passed to it. The rust stub must accept a reference to the runtime as its first argument, and the rest of it's argument list must be solely GC pointers. If the arity of the stub does not align with what has been passed using the intrinsic statement, the resulting behavior is undefined.
 #### Syntax:
