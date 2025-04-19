@@ -45,7 +45,7 @@ Actor my_actor { \
 ### Intrinsic statement
 This provides a way for actors to sequentially call rust functions that must be linked in to the emitted object file. The arguments given to the intrinsic must be the unmangled name of the stub to be called, and a list of runtime values to be passed to it. The rust stub must accept a reference to the runtime as its first argument, and the rest of it's argument list must be solely GC pointers. If the arity of the stub does not align with what has been passed using the intrinsic statement, the resulting behavior is undefined.
 #### Syntax:
-intrinsic(stub_name, "Hello world", 5, 10.2, true) \
+`intrinsic(stub_name, "Hello world", 5, 10.2, true)` \
 This expects a rust function with the following signature to be linked in
 ```rust
 extern "C" fn stub_name(rt: &RT, arg1: Gc, arg2: Gc, arg3: Gc, arg4: Gc)
