@@ -16,10 +16,10 @@ Consists of a boolean value, a branch to follow if the boolean is true, and opti
 #### Syntax:
 ```
 if (condition) { 
-    (statements)
+    (semicolon separated statements)
 } else { 
-    (statements) 
-};
+    (semicolon separated statements) 
+}
 ```
 *Note:* If statements must be followed by a semicolon, just like any other statement
 ### Assignment
@@ -35,15 +35,15 @@ Actors can create other actors dynamically, and the name used for the creation o
 #### Syntax:
 ```
 Actor my_actor {
-    State state_name; 
+    State state_name;
 
-    Initialiser { 
-        (statements) 
+    Initialiser {
+        (semicolon separated statements)
     } 
 
-    Update (argument_name) { 
-        (statements) 
-    } 
+    Update (argument_name) {
+        (semicolon separated statements)
+    }
 }
 ```
 ### Intrinsic statement
