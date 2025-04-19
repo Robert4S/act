@@ -17,6 +17,12 @@ impl Allocator {
         }
     }
 
+    pub fn free_nonreachable(&mut self, reachable: Vec<Gc>) {
+        let ptrs: BTreeSet<usize> = reachable.iter().map(|p| p.ptr).collect();
+        let nonreachable = (0..(self.values.len())).filter(|v| !ptrs.contains(v));
+        nonreachable.for_each(|ptr| self.free(ptr));
+    }
+
     pub fn alloc(&mut self, value: Value) -> usize {
         if let Some(idx) = self.free.pop_first() {
             self.values[idx] = Some(value);
@@ -25,12 +31,6 @@ impl Allocator {
             self.values.push(Some(value));
             self.values.len() - 1
         }
-    }
-
-    pub unsafe fn sweep(&mut self, not_marked: Vec<usize>) -> () {
-        not_marked.into_iter().for_each(|key| {
-            self.free(key);
-        });
     }
 
     #[inline(always)]
@@ -68,14 +68,13 @@ pub enum Undefined {
 }
 
 impl Gc {
-    pub fn mark(&self, runtime: &RT) -> Vec<Gc> {
-        if self.ptr == usize::MAX {
-            return vec![];
+    pub fn mark(&self, runtime: &RT, marks: &mut Vec<Gc>) {
+        if marks.contains(self) {
+            return;
         }
+        marks.push(self.clone());
         let value = runtime.deref_gc(self).clone();
-        let mut value_marked = value.mark(runtime);
-        value_marked.push(self.clone());
-        value_marked
+        value.mark(runtime, marks);
     }
 }
 
@@ -95,22 +94,18 @@ impl Value {
             Value::Undefined(_) => "Undefined".to_string(),
         }
     }
-    pub fn mark(&self, runtime: &RT) -> Vec<Gc> {
+    pub fn mark(&self, runtime: &RT, marks: &mut Vec<Gc>) {
         match self {
-            Self::Number(_) => vec![],
-            Self::String(_) => vec![],
-            Self::Bool(_) => vec![],
-            Self::List(v) => v
-                .iter()
-                .map(|v| {
-                    let mut marks = v.mark(runtime);
-                    marks.push(v.clone());
-                    marks
-                })
-                .flatten()
-                .collect(),
-            Self::Pid(num) => runtime.mark_actor(num),
-            Self::Undefined(_) => vec![],
+            Self::Number(_) => (),
+            Self::String(_) => (),
+            Self::Bool(_) => (),
+            Self::List(v) => {
+                for value in v {
+                    value.mark(runtime, marks);
+                }
+            }
+            Self::Pid(num) => runtime.find_reachable_vals(num, marks),
+            Self::Undefined(_) => (),
         }
     }
 

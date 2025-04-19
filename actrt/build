@@ -1,3 +1,3 @@
 #!/bin/sh
-cargo build
-cp ./target/debug/libactrt.a $HOME/.local/lib
+cargo build --release
+cp ./target/release/libactrt.a $HOME/.local/lib

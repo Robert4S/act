@@ -1,24 +1,23 @@
-use crate::{gc::Undefined, get_rt};
+use rayon::{current_num_threads, prelude::*};
 
 use super::gc::{Allocator, Gc, Value};
 use std::{
     collections::{HashMap, VecDeque},
+    process::exit,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     },
-    thread::{self, yield_now, JoinHandle},
-    usize,
 };
 
-enum GcResult {
-    EmptyMailbox,
-    #[allow(unused)]
-    Updated(Gc),
-}
+pub type Init = extern "C" fn(&RT) -> Gc;
+pub type Update = extern "C" fn(&RT, Gc, Gc) -> Gc;
 
-pub type Init = extern "C" fn(&mut RT) -> Gc;
-pub type Update = extern "C" fn(&mut RT, Gc, Gc) -> Gc;
+#[derive(Debug, Clone)]
+enum ActorState {
+    Uninit,
+    Init(Gc),
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Pid(pub usize);
@@ -27,388 +26,257 @@ pub struct Pid(pub usize);
 struct RTActor {
     init: Init,
     update: Update,
-    state: Gc,
+    state: ActorState,
 }
 
 impl RTActor {
     /// RTActors are lazily initialised. Calling new does not initialise their states with init(),
     /// it must be called separately and set
-    pub fn new(init: Init, update: Update, runtime: &mut RT) -> Self {
+    pub fn new(init: Init, update: Update) -> Self {
         Self {
             init,
             update,
-            state: runtime.make_gc(Value::Undefined(Undefined::Creation)),
+            state: ActorState::Uninit,
         }
     }
 
     /// Updating will call the updater with the state, and return an actor with the new the state if the output is
     /// normal. If the output signals that the actor is done, the return will be None
-    pub fn update(&self, arg: Gc, runtime: &mut RT) -> Option<Self> {
-        let new_state = (self.update)(runtime, arg, self.state);
-        match runtime.deref_gc(&new_state) {
-            Value::String(s) if s.as_str() == "I am done with my work here" => None,
-            _ => Some(Self {
-                state: new_state,
-                ..self.clone()
-            }),
+    pub fn update(&self, arg: Gc, runtime: &RT) -> Self {
+        let state = self.ensure_init();
+        let new_state = (self.update)(runtime, arg, state);
+        Self {
+            state: ActorState::Init(new_state),
+            ..self.clone()
+        }
+    }
+
+    fn ensure_init(&self) -> Gc {
+        match self.state {
+            ActorState::Uninit => panic!("Actor is unitialised upon call to ensure_init"),
+            ActorState::Init(gc) => gc,
+        }
+    }
+
+    fn initialise(&mut self, rt: &RT) {
+        let new_state = (self.init)(rt);
+        self.state = ActorState::Init(new_state);
+    }
+}
+
+#[derive(Debug)]
+struct Mailboxes {
+    boxes: HashMap<Pid, VecDeque<Gc>>,
+    queue: VecDeque<Pid>,
+}
+
+impl Mailboxes {
+    fn push_message(&mut self, pid: Pid, val: Gc) {
+        self.boxes.get_mut(&pid).unwrap().push_back(val);
+        self.queue.push_back(pid);
+    }
+
+    fn pop_message(&mut self) -> Option<(Pid, Gc)> {
+        let pid = self.queue.pop_front()?;
+        let mailbox = self.boxes.get_mut(&pid).expect(&format!(
+            "Holy guacamole pid {pid:?} is in the message queue but has no mailbox"
+        ));
+        let message = mailbox.pop_front()?;
+
+        Some((pid, message))
+    }
+
+    fn add_pid(&mut self, pid: Pid) {
+        self.boxes.insert(pid, VecDeque::new());
+    }
+
+    fn get_mailbox(&self, pid: Pid) -> Option<&VecDeque<Gc>> {
+        self.boxes.get(&pid)
+    }
+
+    fn get_queue_deduped(&self) -> Vec<Pid> {
+        let mut queue: Vec<Pid> = self.queue.iter().cloned().collect();
+        queue.dedup();
+        queue
+    }
+
+    fn is_empty(&self) -> bool {
+        self.boxes.values().all(VecDeque::is_empty)
+    }
+}
+
+impl Mailboxes {
+    fn new() -> Self {
+        Self {
+            boxes: HashMap::new(),
+            queue: VecDeque::new(),
         }
     }
 }
 
 #[derive(Debug)]
 pub struct RT {
-    mailboxes: HashMap<Pid, VecDeque<Gc>>,
-    actors: HashMap<Pid, RTActor>,
-    daemons: HashMap<Pid, RTActor>,
-    statics: Vec<Gc>,
-    started: bool,
-    allocator: Allocator,
-    pid_counter: usize,
-    handlers: HashMap<Pid, JoinHandle<()>>,
-    kill_yourself: Arc<AtomicBool>,
+    mailboxes: Mutex<Mailboxes>,
+    actors: Mutex<HashMap<Pid, RTActor>>,
+    statics: Mutex<Vec<Gc>>,
+    allocator: Mutex<Allocator>,
+    pid_counter: AtomicUsize,
+    epoch: AtomicUsize,
 }
 
 impl RT {
     pub fn new() -> Self {
         Self {
-            mailboxes: HashMap::new(),
-            actors: HashMap::new(),
-            daemons: HashMap::new(),
-            statics: Vec::new(),
-            started: false,
-            allocator: Allocator::new(),
-            pid_counter: 0,
-            handlers: HashMap::new(),
-            kill_yourself: Arc::new(AtomicBool::new(false)),
+            mailboxes: Mutex::new(Mailboxes::new()),
+            actors: Mutex::new(HashMap::new()),
+            statics: Mutex::new(Vec::new()),
+            allocator: Mutex::new(Allocator::new()),
+            pid_counter: AtomicUsize::new(0),
+            epoch: AtomicUsize::new(0),
         }
     }
 
-    pub fn make_static(&mut self, value: Gc) -> () {
-        self.statics.push(value);
+    pub fn make_static(&self, value: Gc) -> () {
+        self.statics.lock().unwrap().push(value);
     }
 
-    /// If the runtime has been started, this will immediately spawn a thread to "run" the actor.
-    /// If not, the actor will be started once the runtime is started
-    pub fn make_actor(&mut self, rt: &'static Arc<Mutex<RT>>, init: Init, update: Update) -> Pid {
-        let actor = RTActor::new(init, update, self);
-        self.pid_counter += 1;
-        let pid = Pid(self.pid_counter);
-        self.actors.insert(pid, actor);
-        self.mailboxes.insert(pid, VecDeque::new());
-
-        if self.started {
-            self.start_actor(rt, pid, false);
-        }
+    pub fn make_actor(&self, init: Init, update: Update) -> Pid {
+        let actor = RTActor::new(init, update);
+        let pid = self.pid_counter.fetch_add(1, Ordering::SeqCst);
+        let pid = Pid(pid);
+        self.actors.lock().unwrap().insert(pid, actor);
+        self.mailboxes.lock().unwrap().add_pid(pid);
 
         pid
     }
 
-    /// If the runtime has been started, this will immediately spawn a thread to "run" the daemon.
-    /// If not, the actor will be started once the runtime is started
-    pub fn make_daemon(&mut self, rt: &'static Arc<Mutex<RT>>, init: Init, update: Update) -> Pid {
-        let actor = RTActor::new(init, update, self);
-        self.pid_counter += 1;
-        let pid = Pid(self.pid_counter);
-        self.daemons.insert(pid, actor);
-        self.mailboxes.insert(pid, VecDeque::new());
-
-        if self.started {
-            self.start_actor(rt, pid, true);
-        }
-
-        pid
-    }
-
-    pub fn make_gc(&mut self, value: Value) -> Gc {
-        let ptr = self.allocator.alloc(value);
+    pub fn make_gc(&self, value: Value) -> Gc {
+        let ptr = self.allocator.lock().unwrap().alloc(value);
         Gc { ptr }
     }
 
-    fn static_pid(&self, pid: &Pid) -> Option<usize> {
-        self.statics
-            .iter()
-            .enumerate()
-            .map(|(idx, c)| (idx, self.deref_gc(c)))
-            .filter(|(_, v)| match v {
-                Value::Pid(p) => p.0 == pid.0,
-                _ => false,
-            })
-            .next()
-            .map(|(idx, _)| idx)
-    }
-
-    pub fn mark_actor(&self, pid: &Pid) -> Vec<Gc> {
-        let state = self
-            .actors
-            .get(pid)
-            .unwrap_or_else(|| self.daemons.get(pid).expect(&format!("Cant find {pid:?}")))
-            .state;
-        let mut from_state = state.mark(self);
-
-        let mailbox = self.mailboxes.get(pid).unwrap();
-        let mut from_mailbox: Vec<_> = mailbox
-            .into_iter()
-            .map(|v| v.mark(self))
-            .flatten()
-            .collect();
-
-        from_state.append(&mut from_mailbox);
-
-        from_state
-    }
-
-    pub fn start_actor(&mut self, rt: &'static Arc<Mutex<RT>>, pid: Pid, is_daemon: bool) -> () {
-        let kill_yourself = if is_daemon {
-            self.kill_yourself.clone()
-        } else {
-            Arc::new(AtomicBool::new(false))
-        };
-
-        let handler = thread::spawn(move || Self::run_actor(pid, &rt, kill_yourself));
-        if is_daemon {
-            self.handlers.insert(pid, handler);
-        } else {
-            self.handlers.insert(pid, handler);
-        }
-    }
-
-    pub fn start_runtime(rt: &'static Arc<Mutex<RT>>) -> () {
-        let mut lock = rt.lock().unwrap();
-        let keys = lock.actors.keys().cloned().collect::<Vec<Pid>>();
-
-        for k in keys {
-            lock.start_actor(rt, k, false);
-        }
-
-        let daemons = lock.daemons.keys().cloned().collect::<Vec<Pid>>();
-
-        for d in daemons {
-            lock.start_actor(rt, d, true);
-        }
-
-        lock.started = true;
-    }
-
     pub fn deref_gc(&self, ptr: &Gc) -> &Value {
-        unsafe { self.allocator.get(ptr.ptr) }
-    }
-
-    pub fn supervise(with_gc: bool) {
-        let mut acc: usize = 0;
-        loop {
-            acc = acc.wrapping_add(1);
-            if acc % 8 != 0 {
-                yield_now();
-                continue;
-            }
-            let rt = get_rt();
-            if rt.lock().unwrap().is_finished() {
-                break;
-            }
-            if acc % 16 == 0 && with_gc {
-                rt.lock().unwrap().run_gc();
-            }
+        unsafe {
+            let raw = self.allocator.lock().unwrap().get(ptr.ptr) as *const Value;
+            &*raw
         }
     }
 
-    pub fn send_actor(&mut self, actor: Gc, value: Gc) {
+    pub fn init_actors(&self) {
+        let mut actors = self.actors.lock().unwrap();
+        let pids: Vec<Pid> = actors.keys().cloned().collect();
+
+        for pid in pids {
+            let actor = actors.get_mut(&pid).unwrap();
+            actor.initialise(self);
+        }
+    }
+
+    pub fn supervise(rt: Arc<Self>) {
+        loop {
+            let _ = rt.epoch.fetch_add(1, Ordering::SeqCst);
+
+            let _new_states: Vec<Gc> = (0..current_num_threads().max(4))
+                .filter_map(|_| rt.mailboxes.lock().unwrap().pop_message())
+                .par_bridge()
+                .into_par_iter()
+                .map({
+                    let rt_clone = rt.clone();
+                    move |(pid, message)| rt_clone.update_actor(pid, message)
+                })
+                .collect();
+
+            let reachable = rt.live_values();
+
+            if rt.mailboxes.lock().unwrap().is_empty() {
+                rt.destruct();
+                exit(0);
+            }
+
+            rt.allocator.lock().unwrap().free_nonreachable(reachable);
+        }
+    }
+
+    pub fn send_actor(&self, actor: Gc, value: Gc) {
         let actor = self.deref_gc(&actor).clone();
 
         match actor {
             Value::Pid(p) => {
-                self.mailboxes.get_mut(&p).unwrap().push_back(value);
+                self.mailboxes.lock().unwrap().push_message(p, value);
             }
             other => panic!("{other:?} is not a PID"),
         }
     }
+
+    pub fn find_reachable_vals(&self, pid: &Pid, marks: &mut Vec<Gc>) {
+        let mailboxes = self.mailboxes.lock().unwrap();
+
+        let mailbox = mailboxes.get_mailbox(pid.clone()).unwrap().clone();
+
+        drop(mailboxes);
+
+        for value in mailbox {
+            value.mark(self, marks);
+        }
+
+        self.actor_state(pid).mark(self, marks);
+    }
 }
 
 impl RT {
-    fn run_actor(pid: Pid, rt: &'static Arc<Mutex<RT>>, kill_myself: Arc<AtomicBool>) {
-        let mut lock = rt.lock().unwrap();
-        lock.init_actor(pid);
-        drop(lock);
-        loop {
-            if kill_myself.load(Ordering::SeqCst) {
-                break;
-            }
-            // VERY IMPORTANT: You cannot lock the world without having a lock on the runtime,
-            // because if you do not have a lock on the runtime, the garbage collecter may get one.
-            // This will result in a deadlock where the GC has the runtime and wants to stop the
-            // world, but a read lock is held on the world here, and will not be released because
-            // it is waiting for a lock on the runtime.
-            let mut rt_lock = rt.lock().unwrap();
-            match rt_lock.update_actor(pid) {
-                None => break,
-                Some(GcResult::EmptyMailbox) => (),
-                Some(GcResult::Updated(_)) => continue,
-            }
-            drop(rt_lock);
-        }
-    }
-
-    fn init_actor(&mut self, pid: Pid) {
-        let actor = self
-            .actors
-            .get(&pid)
-            .unwrap_or_else(|| self.daemons.get(&pid).unwrap())
-            .clone();
-        let state = (actor.init)(self);
-        let new_actor = RTActor {
-            state,
-            ..actor.clone()
-        };
-        if self.actors.contains_key(&pid) {
-            self.actors.insert(pid, new_actor);
-        } else {
-            self.daemons.insert(pid, new_actor);
-        }
-    }
-
-    fn live_values(&mut self, roots: Vec<Gc>) -> Vec<usize> {
-        let t = roots.clone();
-        let root_values = t
+    fn destruct(&self) {
+        let actors = self.actors.lock().unwrap();
+        let states: Vec<(Pid, Value)> = actors
             .iter()
-            .map(|ptr| self.deref_gc(ptr))
-            .cloned()
-            .collect::<Vec<_>>();
+            .map(|(pid, actor)| (pid.clone(), self.deref_gc(&actor.ensure_init()).clone()))
+            .collect();
 
-        let mut marks = vec![];
-        for v in root_values {
-            marks.push(v.mark(self));
+        drop(actors);
+
+        for (pid, final_state) in states {
+            println!(
+                "PID({}) finished with {}",
+                pid.0,
+                final_state.to_string(self)
+            );
         }
-
-        let mut marks = marks
-            .into_iter()
-            .flatten()
-            .map(|p| p.ptr)
-            .chain(roots.iter().map(|p| p.ptr))
-            .collect::<Vec<usize>>();
-
-        marks.dedup();
-
-        marks
     }
 
-    fn update_actor(&mut self, pid: Pid) -> Option<GcResult> {
-        let actor = self
-            .actors
-            .get(&pid)
-            .unwrap_or_else(|| self.daemons.get(&pid).unwrap())
-            .clone();
-        let message = self.mailboxes.get_mut(&pid).unwrap().pop_front();
-        match message {
-            Some(v) => {
-                let new_actor = actor.update(v, self)?;
-                if self.actors.contains_key(&pid) {
-                    self.actors.insert(pid, new_actor.clone());
-                } else {
-                    self.daemons.insert(pid, new_actor.clone());
-                }
-                Some(GcResult::Updated(new_actor.state))
-            }
-            None => Some(GcResult::EmptyMailbox),
-        }
+    fn update_actor(&self, pid: Pid, message: Gc) -> Gc {
+        let actor = self.actors.lock().unwrap().get(&pid).unwrap().clone();
+        let new_actor = actor.update(message, self);
+        self.actors.lock().unwrap().insert(pid, new_actor.clone());
+        new_actor.ensure_init()
     }
 
     pub fn dump_frees(&self) {
-        println!("{:?}", self.allocator.free);
-    }
-
-    fn mark_and_sweep(&mut self, roots: Vec<Gc>) {
-        let marks = self.live_values(roots);
-
-        let not_marked = {
-            (0..(self.allocator.values.len() - 1))
-                .filter(|key| !marks.contains(key))
-                .collect::<Vec<usize>>()
-        };
-
-        unsafe { self.allocator.sweep(not_marked) }
+        println!("{:?}", self.allocator.lock().unwrap().free);
     }
 
     fn actor_state(&self, pid: &Pid) -> Gc {
-        self.actors
-            .get(pid)
-            .unwrap_or_else(|| self.daemons.get(pid).unwrap())
-            .state
+        self.actors.lock().unwrap().get(pid).unwrap().ensure_init()
     }
 
-    fn is_finished(&mut self) -> bool {
-        let handlers_done = self
-            .handlers
-            .iter()
-            .filter_map(|(pid, handle)| {
-                if handle.is_finished() {
-                    Some(pid)
-                } else {
-                    None
-                }
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+    fn live_values(&self) -> Vec<Gc> {
+        let statics = self.statics.lock().unwrap();
+        let statics_clone = statics.clone();
+        drop(statics);
+        let mut marks = vec![];
 
-        for pid in handlers_done {
-            println!(
-                "Pid {} finished with {:?}",
-                pid.0,
-                self.deref_gc(&self.actor_state(&pid))
-            );
-            if self.actors.contains_key(&pid) {
-                self.actors.remove(&pid);
-            } else {
-                self.daemons.remove(&pid);
-            }
-            self.mailboxes.remove(&pid);
-            self.handlers.remove(&pid);
-            if let Some(idx) = self.static_pid(&pid) {
-                self.statics.remove(idx);
-            }
+        for static_var in statics_clone {
+            static_var.mark(self, &mut marks);
         }
 
-        let actors_empty = self.actors.is_empty();
+        let mailboxes = self.mailboxes.lock().unwrap();
 
-        let mailboxes_empty =
-            self.all_initialised() && self.mailboxes.values().all(VecDeque::is_empty);
+        let nonempty: Vec<Pid> = mailboxes.get_queue_deduped();
 
-        if actors_empty && mailboxes_empty {
-            self.mailboxes.keys().for_each(|pid| {
-                println!(
-                    "PID {} finished with {:?}",
-                    pid.0,
-                    self.deref_gc(&self.actor_state(pid))
-                )
-            });
-            self.end_runtime();
+        drop(mailboxes);
+
+        for pid in nonempty {
+            self.find_reachable_vals(&pid, &mut marks);
         }
 
-        actors_empty && mailboxes_empty
-    }
-
-    fn end_runtime(&mut self) {
-        self.kill_yourself.store(true, Ordering::SeqCst);
-    }
-
-    fn all_initialised(&self) -> bool {
-        self.actors.values().all(|a| match self.deref_gc(&a.state) {
-            Value::Undefined(Undefined::Creation) => false,
-            _ => true,
-        })
-    }
-
-    fn run_gc(&mut self) {
-        let static_roots = self.statics.iter().cloned();
-        let mailbox_roots = self
-            .mailboxes
-            .values()
-            .filter(|v| !v.is_empty())
-            .flatten()
-            .cloned();
-
-        let mut roots: Vec<Gc> = static_roots.chain(mailbox_roots).collect();
-
-        roots.dedup();
-
-        self.mark_and_sweep(roots);
+        marks
     }
 }

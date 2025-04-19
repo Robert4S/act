@@ -3,17 +3,17 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-use gc_new::{Gc, Undefined, Value};
-use runtime_new::RT;
+use gc::{Gc, Undefined, Value};
+use runtime::RT;
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
 }
 
 //mod gc;
-mod gc_new;
+mod gc;
 //mod runtime;
-mod runtime_new;
+mod runtime;
 
 static RT: LazyLock<Arc<RT>> = LazyLock::new(|| Arc::new(RT::new()));
 
