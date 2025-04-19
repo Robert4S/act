@@ -59,11 +59,17 @@ fn compile() -> Result<(), String> {
     Command::new("gcc")
         .arg("-o")
         .arg(stem.to_string())
-        .arg(&format!("{stem}.o"))
+        .arg(&format!("./{stem}.o"))
         .arg(format!("{home}/.local/lib/libactrt.a"))
-        .spawn()
+        .status()
         .map_err(|_| "It seems you do not have GCC installed".to_string())
-        .map(|_| ())
+        .map(|_| ())?;
+
+    let _ = fs::remove_dir_all("act_bin");
+
+    fs::create_dir("act_bin").map_err(|e| e.to_string())?;
+    fs::rename(format!("{stem}.o"), format!("./act_bin/{stem}.o")).map_err(|e| e.to_string())?;
+    fs::rename(format!("{stem}"), format!("./act_bin/{stem}")).map_err(|e| e.to_string())
 }
 
 fn gen_cranelift(instrs: Cst, debug: bool, name: &str) -> Result<(), String> {
