@@ -15,10 +15,10 @@ The Initialiser and Updater functions for actors are collections of statements. 
 Consists of a boolean value, a branch to follow if the boolean is true, and optionally, a branch to follow if it is not true. Each of these branches are also collections of statements.
 #### Syntax:
 ```
-if (condition) { \
-    (statements) \
-} else { \
-    (statements) \
+if (condition) { 
+    (statements)
+} else { 
+    (statements) 
 };
 ```
 *Note:* If statements must be followed by a semicolon, just like any other statement
@@ -34,16 +34,16 @@ An actor can send a value as a message to another actor, and this message will b
 Actors can create other actors dynamically, and the name used for the creation of this actor will become a variable with the value of the spawned actor's PID.
 #### Syntax:
 ```
-Actor my_actor { \
-    State state_name; \
-\
-    Initialiser { \
-        (statements) \
-    } \
-\
-    Update (argument_name) { \
-        (statements) \
-    } \
+Actor my_actor {
+    State state_name; 
+
+    Initialiser { 
+        (statements) 
+    } 
+
+    Update (argument_name) { 
+        (statements) 
+    } 
 }
 ```
 ### Intrinsic statement
