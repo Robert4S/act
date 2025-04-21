@@ -1,6 +1,6 @@
 # Compiler and runtime for 'Act' programming language
 # Dependencies
-For simplicity, the Gnu C Compiler is used to lower and link the emitted assembly, so it is a requirement. The rust toolchain (cargo) is also required to build the compiler and runtime library.
+The gnu C compiler (GCC) is used to link the emitted object to the runtime library, because I cannot figure out how to use the gnu linker. The rust toolchain (cargo) is also required to build the compiler and runtime library.
 ## Model of computation
 The act programming language follows the actor model purely. There are no functions or objects, and the main building block for computation is an actor.
 ## Memory model
