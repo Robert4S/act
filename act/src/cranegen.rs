@@ -589,7 +589,7 @@ impl<'a> FunctionTranslator<'a> {
     fn translate_expr(&mut self, expr: Expr) -> Value {
         match expr {
             Expr::Number(f) => {
-                let imm = self.builder.ins().f32const(f);
+                let imm = self.builder.ins().f64const(f);
 
                 self.make_number(imm)
             }
@@ -663,7 +663,7 @@ impl<'a> FunctionTranslator<'a> {
 
         // Add a parameter for each argument.
         sig.params.push(AbiParam::new(self.int));
-        sig.params.push(AbiParam::new(types::F32));
+        sig.params.push(AbiParam::new(types::F64));
 
         // For simplicity for now, just make all calls return a single I64.
         sig.returns.push(AbiParam::new(self.int));

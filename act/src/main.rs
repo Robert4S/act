@@ -1,13 +1,16 @@
 use clap::Parser;
 use cranegen::Compiler;
-use cst::Cst;
 use std::{env, fs, path::PathBuf, process::Command, str::FromStr};
+mod frontend;
+use frontend::{
+    cst, cst_typed,
+    tokenise::{self, TokenKind},
+};
 
+use cst::Cst;
 use tokenise::tokenize_all;
-mod cst;
 
 mod cranegen;
-mod tokenise;
 
 #[derive(Parser)]
 #[command(version, about = "Compiler for the act language", long_about = None)]
@@ -26,6 +29,11 @@ fn main() {
     if let Err(e) = compile() {
         println!("{e}");
     }
+}
+
+fn test_typechecking(tokens: &[(TokenKind, usize)]) {
+    let cst = cst_typed::parse(tokens).unwrap();
+    println!("{cst:?}");
 }
 
 fn compile() -> Result<(), String> {
@@ -50,6 +58,7 @@ fn compile() -> Result<(), String> {
         .collect();
 
     let tokenised = tokenize_all(input.as_slice()).ok_or("Error tokenising")?;
+    test_typechecking(&tokenised);
     let tree = cst::parse(&tokenised).map_err(|e| format!("Error parsing: {e:?}"))?;
 
     gen_cranelift(tree, args.debug, &format!("{stem}.o"))?;

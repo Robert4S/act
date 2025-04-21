@@ -1,0 +1,31 @@
+Actor sum {
+	State acc;
+
+	Initialiser {
+		send(call_me, sum);
+		return 0;
+	}
+
+	Update (num) {
+		if (num <= 0) {
+			intrinsic(print_value, acc);
+			intrinsic(print_value, "\n");
+			return acc;
+		};
+		send(call_me, sum);
+		return acc + num;
+	}
+}
+
+Actor call_me {
+	State nothing;
+
+	Initialiser {
+		return 10000;
+	}
+	
+	Update (who) {
+		send(who, nothing);
+		return nothing - 1;
+	}
+}

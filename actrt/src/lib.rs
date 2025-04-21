@@ -40,7 +40,7 @@ pub extern "C" fn make_actor_global(
 }
 
 #[no_mangle]
-pub extern "C" fn make_gc_number(rt: &RT, number: f32) -> Gc {
+pub extern "C" fn make_gc_number(rt: &RT, number: f64) -> Gc {
     let res = rt.make_gc(Value::Number(number));
     res
 }

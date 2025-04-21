@@ -11,6 +11,8 @@ pub enum TokenKind {
     Rparen,
     Comma,
     Semi,
+    Colon,
+    Dot,
 
     // Keywords
     Not,
@@ -26,12 +28,15 @@ pub enum TokenKind {
     Else,
     Daemon,
     Intrinsic,
+    Forall,
 
     // Rules
     Infix(InfixToken),
-    Number(f32),
+    Number(f64),
     Symbol(String),
     String(String),
+    TypeName(String),
+    TypeVar(String),
 
     // EOF
     EOF,
@@ -76,6 +81,8 @@ pub fn tokenize<'a>(input: &'a [char], line_number: usize) -> Option<(Token, Vec
         ['}', rest @ ..] => Some(((TokenKind::Rbrac, line_number), rest.to_owned())),
         [',', rest @ ..] => Some(((TokenKind::Comma, line_number), rest.to_owned())),
         [';', rest @ ..] => Some(((TokenKind::Semi, line_number), rest.to_owned())),
+        [':', rest @ ..] => Some(((TokenKind::Colon, line_number), rest.to_owned())),
+        ['.', rest @ ..] => Some(((TokenKind::Dot, line_number), rest.to_owned())),
         ['#', rest @ ..] => {
             let mut toks = rest;
             loop {
@@ -100,12 +107,27 @@ pub fn tokenize<'a>(input: &'a [char], line_number: usize) -> Option<(Token, Vec
         other => vec![
             tokenise_number,
             tokenise_infix,
+            tokenise_typevar,
             tokenise_symbol,
+            tokenise_typename,
             tokenise_string,
         ]
         .iter()
         .filter_map(|f| f(other, line_number))
         .next(),
+    }
+}
+
+fn tokenise_typevar<'a>(input: &'a [char], line_number: usize) -> Option<(Token, Vec<char>)> {
+    if let ['\'', rest @ ..] = input {
+        let (name, rest) = tokenise_symbol(rest, line_number)?;
+        if let TokenKind::Symbol(s) = name.0 {
+            Some(((TokenKind::TypeVar(s), name.1), rest))
+        } else {
+            panic!()
+        }
+    } else {
+        None
     }
 }
 
@@ -166,14 +188,41 @@ fn tokenise_number<'a>(input: &'a [char], line_number: usize) -> Option<(Token, 
     left.push('.');
     left.push_str(&right);
 
-    let n = left.parse::<f32>().ok()?;
+    let n = left.parse::<f64>().ok()?;
     Some(((TokenKind::Number(n), line_number), input.to_vec()))
 }
 
-fn tokenise_symbol<'a>(input: &'a [char], line_number: usize) -> Option<(Token, Vec<char>)> {
+fn tokenise_typename<'a>(input: &'a [char], line_number: usize) -> Option<(Token, Vec<char>)> {
+    let mut s = match input {
+        [c, ..] if c.is_lowercase() => return None,
+        _ => "".to_string(),
+    };
     let mut input = input;
-    let mut s = "".to_string();
-    let cannot_contain = "{}\"(),;".chars().collect::<Vec<char>>();
+    let cannot_contain = "{}\"(),;.:".chars().collect::<Vec<char>>();
+    let cannot_contain = cannot_contain.as_slice();
+
+    while let [c, rest @ ..] = input {
+        if cannot_contain.contains(c) || c.is_whitespace() {
+            let mut rest: Vector<_> = rest.into();
+            rest.push_front(*c);
+            return Some((
+                (TokenKind::TypeName(s), line_number),
+                rest.into_iter().collect(),
+            ));
+        }
+        s.push(*c);
+        input = rest;
+    }
+    None
+}
+
+fn tokenise_symbol<'a>(input: &'a [char], line_number: usize) -> Option<(Token, Vec<char>)> {
+    let mut s = match input {
+        [c, ..] if c.is_uppercase() => return None,
+        _ => "".to_string(),
+    };
+    let mut input = input;
+    let cannot_contain = "{}\"(),;.:".chars().collect::<Vec<char>>();
     let cannot_contain = cannot_contain.as_slice();
 
     while let [c, rest @ ..] = input {
@@ -225,16 +274,17 @@ fn update_keyword(token: Token) -> Token {
     match token {
         (TokenKind::Symbol(s), n) => (
             match s.as_str() {
-                "Actor" => TokenKind::Actor,
-                "Daemon" => TokenKind::Daemon,
+                "actor" => TokenKind::Actor,
+                "daemon" => TokenKind::Daemon,
                 "send" => TokenKind::Send,
+                "forall" => TokenKind::Send,
                 "return" => TokenKind::Return,
                 "false" => TokenKind::False,
                 "true" => TokenKind::True,
-                "Initialiser" => TokenKind::Initialiser,
-                "Update" => TokenKind::Update,
+                "initialiser" => TokenKind::Initialiser,
+                "update" => TokenKind::Update,
                 "not" => TokenKind::Not,
-                "State" => TokenKind::State,
+                "state" => TokenKind::State,
                 "if" => TokenKind::If,
                 "else" => TokenKind::Else,
                 "intrinsic" => TokenKind::Intrinsic,

@@ -1,5 +1,5 @@
 use core::panic;
-use std::{collections::BTreeSet, usize};
+use std::collections::BTreeSet;
 
 use super::runtime::{Pid, RT};
 
@@ -40,20 +40,21 @@ impl Allocator {
     }
 
     pub unsafe fn get(&self, idx: usize) -> &Value {
-        let reference = self
-            .values
-            .get(idx)
-            .expect(&format!("Yeah {idx} is not in the backing array bucko"));
-        match reference {
-            Some(v) => unsafe { &*(v as *const Value) },
-            None => panic!("Invalid dereference {idx}"),
-        }
+        // TODO: Change when debugging
+        self.values.get_unchecked(idx).as_ref().unwrap_unchecked()
+        //let reference = self
+        //    .values
+        //    .get(idx)
+        //    .expect(&format!("Yeah {idx} is not in the backing array bucko"));
+        //reference
+        //    .as_ref()
+        //    .expect(&format!("{idx} is not allocated"))
     }
 }
 
 #[derive(Clone, Debug)]
 pub enum Value {
-    Number(f32),
+    Number(f64),
     String(String),
     Bool(bool),
     List(Vec<Gc>),

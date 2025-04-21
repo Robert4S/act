@@ -1,4 +1,4 @@
-use std::{f32::NAN, fmt::Debug};
+use std::{f64::NAN, fmt::Debug};
 
 use crate::tokenise::{InfixToken, Token, TokenKind};
 use im::Vector;
@@ -134,7 +134,7 @@ pub struct Assignment {
 
 #[derive(Debug, Clone)]
 pub enum Expr {
-    Number(f32),
+    Number(f64),
     String(String),
     Symbol(String),
     Bool(bool),
