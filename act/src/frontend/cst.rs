@@ -66,13 +66,7 @@ impl Debug for ParseError {
 
 type Result<T> = std::result::Result<T, ParseError>;
 
-pub type Cst = Vector<ActorKind>;
-
-#[derive(Debug, Clone)]
-pub enum ActorKind {
-    Daemon(Actor),
-    Actor(Actor),
-}
+pub type Cst = Vec<Actor>;
 
 #[derive(Debug, Clone)]
 pub struct Actor {
@@ -82,23 +76,18 @@ pub struct Actor {
     pub update: Update,
 }
 
-impl Actor {
-    pub fn get_state_name(&self) -> String {
-        match &self.state.0 {
-            Expr::Symbol(s) => s.clone(),
-            _ => panic!("State must be a symbol"),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Update {
     pub inp_name: String,
+    pub inp_type: TypeExpr,
     pub body: Vector<Statement>,
 }
 
 #[derive(Debug, Clone)]
-pub struct State(Expr);
+pub struct State {
+    pub name: String,
+    pub type_: TypeExpr,
+}
 
 #[derive(Debug, Clone)]
 pub struct Initialiser {
@@ -129,7 +118,23 @@ pub enum Statement {
 #[derive(Debug, Clone)]
 pub struct Assignment {
     pub left: String,
+    pub type_: TypeExpr,
     pub right: Expr,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct Forall {
+    pub vars: Vec<String>,
+    pub then: Box<TypeExpr>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum TypeExpr {
+    Base(String),
+    Actor(Box<TypeExpr>),
+    Forall(Forall),
+    TypeVar(String),
+    Constructor { name: String, args: Vec<TypeExpr> },
 }
 
 #[derive(Debug, Clone)]
@@ -151,14 +156,117 @@ pub fn parse(tokens: &[Token]) -> Result<Cst> {
     while !matches!(tokens, [(TokenKind::EOF, _)]) {
         let (actor, rest) = parse_actor(tokens)?;
         let actor = match actor {
-            Statement::Actor(a) => ActorKind::Actor(a),
-            Statement::Daemon(a) => ActorKind::Daemon(a),
+            Statement::Actor(a) => a,
             o => panic!("nonono {o:?} is not an actor"),
         };
         actors.push(actor);
         tokens = rest;
     }
     Ok(actors.into())
+}
+
+fn parse_type_expr(tokens: &[Token]) -> Result<(TypeExpr, &[Token])> {
+    vec![
+        parse_constructor_app,
+        parse_base_type,
+        parse_forall,
+        parse_typevar,
+    ]
+    .iter()
+    .filter_map(|f| f(tokens))
+    .next()
+    .ok_or(ParseError::NoRuleMatch {
+        expected: "Type expression".to_string(),
+        remaining: tokens.iter().cloned().collect(),
+    })
+}
+
+fn parse_constructor_app(tokens: &[Token]) -> Option<(TypeExpr, &[Token])> {
+    let (name, rest) = match tokens {
+        [(TokenKind::TypeName(s), _), rest @ ..] => (s.clone(), rest),
+        _ => return None,
+    };
+
+    let (_, rest) = parse_lparen(rest).ok()?;
+    let (args, rest) = parse_constructor_app_tail(rest)?;
+
+    if name.as_str() == "Pid" && args.len() == 1 {
+        return Some((TypeExpr::Actor(Box::new(args[0].clone())), rest));
+    }
+
+    Some((TypeExpr::Constructor { name, args }, rest))
+}
+
+fn parse_constructor_app_tail(tokens: &[Token]) -> Option<(Vec<TypeExpr>, &[Token])> {
+    let (e, tokens) = parse_type_expr(tokens).ok()?;
+    let mut exprs = vec![e];
+    let mut tokens = tokens;
+    while !matches!(tokens, [(TokenKind::Rparen, _), ..]) {
+        let (_, rest) = parse_comma(tokens).ok()?;
+        let (e, rest) = parse_type_expr(rest).ok()?;
+        tokens = rest;
+        exprs.push(e);
+    }
+    let (_, tokens) = parse_rparen(tokens).ok()?;
+
+    Some((exprs, tokens))
+}
+
+fn parse_base_type(tokens: &[Token]) -> Option<(TypeExpr, &[Token])> {
+    match tokens {
+        [(TokenKind::TypeName(s), _), rest @ ..] => Some((TypeExpr::Base(s.clone()), rest)),
+        _ => None,
+    }
+}
+
+fn parse_forall(tokens: &[Token]) -> Option<(TypeExpr, &[Token])> {
+    if let [(TokenKind::Forall, _), rest @ ..] = tokens {
+        let (_, rest) = parse_lparen(tokens).ok()?;
+
+        let (vars, rest) = parse_forall_tail(rest)?;
+        let (body, rest) = parse_type_expr(rest).ok()?;
+        Some((
+            TypeExpr::Forall(Forall {
+                vars,
+                then: Box::new(body),
+            }),
+            rest,
+        ))
+    } else {
+        None
+    }
+}
+
+fn parse_forall_tail(tokens: &[Token]) -> Option<(Vec<String>, &[Token])> {
+    let (TypeExpr::TypeVar(first), tokens) = parse_typevar(tokens)? else {
+        return None;
+    };
+
+    let mut vars = vec![first];
+    let mut tokens = tokens;
+    while !matches!(tokens, [(TokenKind::Rparen, _), ..]) {
+        let (_, rest) = parse_comma(tokens).ok()?;
+        let (TypeExpr::TypeVar(e), rest) = parse_typevar(rest)? else {
+            return None;
+        };
+        tokens = rest;
+        vars.push(e);
+    }
+
+    let (_, tokens) = parse_rparen(tokens).ok()?;
+    let [(TokenKind::Dot, _), tokens @ ..] = tokens else {
+        return None;
+    };
+
+    Some((vars, tokens))
+}
+
+fn parse_typevar(tokens: &[Token]) -> Option<(TypeExpr, &[Token])> {
+    if let [(TokenKind::TypeVar(name), _), rest @ ..] = tokens {
+        Some((TypeExpr::TypeVar(name.clone()), rest))
+    } else {
+        None
+    }
 }
 
 fn parse_symbol(tokens: &[Token]) -> Result<(String, &[Token])> {
@@ -190,7 +298,7 @@ fn parse_actor(tokens: &[Token]) -> Result<(Statement, &[Token])> {
     Ok((
         kind.unwrap()(Actor {
             name,
-            state: State(state),
+            state,
             update,
             initialiser,
         }),
@@ -226,12 +334,15 @@ fn parse_rparen(tokens: &[Token]) -> Result<((), &[Token])> {
     }
 }
 
-fn parse_state(tokens: &[Token]) -> Result<(Expr, &[Token])> {
+fn parse_state(tokens: &[Token]) -> Result<(State, &[Token])> {
     match tokens {
-        [(TokenKind::State, _), rest @ ..] => match parse_expr(rest)? {
-            (state, [(TokenKind::Semi, _), rest @ ..]) => Ok((state, rest)),
-            (_, other) => end_of_match!(other, TokenKind::Semi),
-        },
+        [(TokenKind::State, _), rest @ ..] => {
+            let (name, rest) = parse_symbol(rest)?;
+            let rest = parse_colon(rest)?;
+            let (type_, rest) = parse_type_expr(rest)?;
+            let rest = parse_semi(rest)?;
+            Ok((State { type_, name }, rest))
+        }
         other => end_of_match!(other, TokenKind::State),
     }
 }
@@ -353,13 +464,23 @@ fn parse_intrinsic_literal(tokens: &[Token]) -> Result<&[Token]> {
     }
 }
 
+fn parse_colon(tokens: &[Token]) -> Result<&[Token]> {
+    match tokens {
+        [(TokenKind::Colon, _), rest @ ..] => Ok(rest),
+        other => end_of_match!(other, TokenKind::Colon),
+    }
+}
+
 fn parse_assignment(tokens: &[Token]) -> Result<(Statement, &[Token])> {
     let (name, tokens) = parse_symbol(tokens)?;
+    let tokens = parse_colon(tokens)?;
+    let (type_, tokens) = parse_type_expr(tokens)?;
     match tokens {
         [(TokenKind::Infix(InfixToken::Assign), _), tokens @ ..] => {
             let (expr, tokens) = parse_expr(tokens)?;
             Ok((
                 Statement::Assignment(Assignment {
+                    type_,
                     left: name.clone(),
                     right: expr,
                 }),
@@ -471,10 +592,13 @@ fn parse_updater(tokens: &[Token]) -> Result<(Update, &[Token])> {
         [(TokenKind::Update, _), tokens @ ..] => {
             let (_, tokens) = parse_lparen(tokens)?;
             let (arg, tokens) = parse_symbol(tokens)?;
+            let tokens = parse_colon(tokens)?;
+            let (inp_type, tokens) = parse_type_expr(tokens)?;
             let (_, tokens) = parse_rparen(tokens)?;
             let (statements, tokens) = parse_statement_block(tokens)?;
             Ok((
                 Update {
+                    inp_type,
                     inp_name: arg.clone(),
                     body: statements,
                 },

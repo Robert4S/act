@@ -1,15 +1,11 @@
-Actor factorial {
-        State accumulator;
-	Initialiser {
+actor factorial {
+        state accumulator: Num;
+	initialiser {
             send(factorial, 8);
             return 1;
         }
 
-        Update (message) {
-	    # intrinsic(print_value, "Arg: ");
-	    # intrinsic(print_value, message);
-	    # intrinsic(print_value, "\n");
-
+        update (message: Num) {
             if (message <= 1) {
 	        intrinsic(print_value, " Accumulator: ");
 	        intrinsic(print_value, accumulator);
@@ -22,15 +18,15 @@ Actor factorial {
 	}
 }
 
-Actor summing {
-	State sum;
+actor summing {
+	state sum: Num;
 
-	Initialiser {
+	initialiser {
 		send(summing, 100);
 		return 0;
 	}
 
-	Update (num) {
+	update (num: Num) {
 		if (num <= 0) {
 			return sum;
 		};
@@ -39,14 +35,14 @@ Actor summing {
 	}
 }
 
-Actor print {
-	State t;
+actor print {
+	state t: Num;
 
-	Initialiser {
+	initialiser {
 		return 0;
 	}
 
-	Update (arg) {
+	update (arg: Num) {
 		intrinsic(print_value, "Printing value ");
 		intrinsic(print_value, arg);
 		intrinsic(print_value, "\n");

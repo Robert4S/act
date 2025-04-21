@@ -1,12 +1,12 @@
-Actor sum {
-	State acc;
+actor sum {
+	state acc: Num;
 
-	Initialiser {
+	initialiser {
 		send(call_me, sum);
 		return 0;
 	}
 
-	Update (num) {
+	update (num: Num) {
 		if (num <= 0) {
 			intrinsic(print_value, acc);
 			intrinsic(print_value, "\n");
@@ -17,15 +17,15 @@ Actor sum {
 	}
 }
 
-Actor call_me {
-	State nothing;
+actor call_me {
+	state not_mine: Num;
 
-	Initialiser {
+	initialiser {
 		return 10000;
 	}
 	
-	Update (who) {
-		send(who, nothing);
-		return nothing - 1;
+	update (who: Pid(Num)) {
+		send(who, not_mine);
+		return not_mine - 1;
 	}
 }

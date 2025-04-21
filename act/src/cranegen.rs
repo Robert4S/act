@@ -10,7 +10,8 @@ use im::HashMap;
 use isa::CallConv;
 
 use crate::{
-    cst::{ActorKind, Cst, Expr, Statement},
+    cst::{Cst, Expr, Statement},
+    frontend::cst,
     tokenise::InfixToken,
 };
 
@@ -149,11 +150,7 @@ impl Compiler {
         self.data_description.clear();
         let mut slots = vec![];
         for a in &cst {
-            let name = match &a {
-                ActorKind::Actor(a) => &a.name,
-                ActorKind::Daemon(a) => &a.name,
-            };
-
+            let name = &a.name;
             self.globals.insert(name.clone());
             let pid_slot = self
                 .module
@@ -183,11 +180,8 @@ impl Compiler {
         Ok(())
     }
 
-    fn translate_actor(&mut self, actor: ActorKind, pid_slot: DataId) -> Result<(), ModuleError> {
-        let a = match &actor {
-            ActorKind::Actor(a) => a.clone(),
-            ActorKind::Daemon(a) => a.clone(),
-        };
+    fn translate_actor(&mut self, actor: cst::Actor, pid_slot: DataId) -> Result<(), ModuleError> {
+        let a = actor;
         if self.debug {
             println!("Actor {}", a.name);
         }
@@ -223,7 +217,7 @@ impl Compiler {
             vec![
                 String::from("RUNTIME"),
                 a.update.inp_name.clone(),
-                a.get_state_name(),
+                a.state.name.clone(),
             ],
             a.update.body.into_iter().collect(),
         )
@@ -251,11 +245,7 @@ impl Compiler {
             update: update_id,
         };
 
-        if let ActorKind::Daemon(_) = actor {
-            self.daemons.push(actor_id);
-        } else {
-            self.actors.push(actor_id);
-        }
+        self.actors.push(actor_id);
 
         Ok(())
     }
@@ -300,7 +290,6 @@ impl Compiler {
         let ret_block = builder.create_block();
 
         let actors = self.actors.clone();
-        let daemons = self.daemons.clone();
 
         let mut trans = FunctionTranslator {
             int,
@@ -315,10 +304,6 @@ impl Compiler {
 
         for actor in actors {
             trans.define_actor(actor);
-        }
-
-        for daemon in daemons {
-            trans.define_daemon(daemon);
         }
 
         trans.translate_call("start_runtime".to_string(), vec![]);
@@ -457,7 +442,7 @@ struct FunctionTranslator<'a> {
 }
 
 impl<'a> FunctionTranslator<'a> {
-    fn define_actor_comb(&mut self, actor: Actor, is_daemon: bool) {
+    fn define_actor(&mut self, actor: Actor) {
         let init_ref = self
             .module
             .declare_func_in_func(actor.init, &mut self.builder.func);
@@ -475,21 +460,9 @@ impl<'a> FunctionTranslator<'a> {
 
         let pid_slot_addr = self.builder.ins().symbol_value(self.int, pid_slot_ref);
 
-        let name = if is_daemon {
-            "make_daemon".to_string()
-        } else {
-            "make_actor_global".to_string()
-        };
+        let name = "make_actor_global".to_string();
 
         self.translate_call(name, vec![init_ptr, update_ptr, pid_slot_addr]);
-    }
-
-    fn define_actor(&mut self, actor: Actor) {
-        self.define_actor_comb(actor, false);
-    }
-
-    fn define_daemon(&mut self, actor: Actor) {
-        self.define_actor_comb(actor, true);
     }
 
     fn translate_stmt(&mut self, stmt: Statement) -> bool {

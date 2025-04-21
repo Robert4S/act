@@ -3,8 +3,9 @@ use cranegen::Compiler;
 use std::{env, fs, path::PathBuf, process::Command, str::FromStr};
 mod frontend;
 use frontend::{
-    cst, cst_typed,
+    cst,
     tokenise::{self, TokenKind},
+    typecheck::TypeChecker,
 };
 
 use cst::Cst;
@@ -32,8 +33,8 @@ fn main() {
 }
 
 fn test_typechecking(tokens: &[(TokenKind, usize)]) {
-    let cst = cst_typed::parse(tokens).unwrap();
-    println!("{cst:?}");
+    let cst = cst::parse(tokens).unwrap();
+    TypeChecker::validate_prog(cst, vec![]).unwrap();
 }
 
 fn compile() -> Result<(), String> {
