@@ -25,7 +25,7 @@ if (condition) {
 ### Assignment
 Assignments are for assigning the value of the expression on the right hand side to the variable name on the left hand side
 #### Syntax:
-`variable_name = expression`
+`variable_name: Type = expression`
 ### Send
 An actor can send a value as a message to another actor, and this message will be added to the other actor's message queue. Any expression can be sent as a message
 #### Syntax:
@@ -34,14 +34,14 @@ An actor can send a value as a message to another actor, and this message will b
 Actors can create other actors dynamically, and the name used for the creation of this actor will become a variable with the value of the spawned actor's PID.
 #### Syntax:
 ```
-Actor my_actor {
-    State state_name;
+actor my_actor {
+    state state_name: StateType;
 
-    Initialiser {
+    initialiser {
         (semicolon separated statements)
     } 
 
-    Update (argument_name) {
+    update (arg_name: ArgType) {
         (semicolon separated statements)
     }
 }
