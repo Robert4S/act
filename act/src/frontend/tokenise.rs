@@ -13,6 +13,8 @@ pub enum TokenKind {
     Semi,
     Colon,
     Dot,
+    Lsquare,
+    Rsquare,
 
     // Keywords
     Not,
@@ -83,6 +85,8 @@ pub fn tokenize<'a>(input: &'a [char], line_number: usize) -> Option<(Token, Vec
         [';', rest @ ..] => Some(((TokenKind::Semi, line_number), rest.to_owned())),
         [':', rest @ ..] => Some(((TokenKind::Colon, line_number), rest.to_owned())),
         ['.', rest @ ..] => Some(((TokenKind::Dot, line_number), rest.to_owned())),
+        ['[', rest @ ..] => Some(((TokenKind::Lsquare, line_number), rest.to_owned())),
+        [']', rest @ ..] => Some(((TokenKind::Rsquare, line_number), rest.to_owned())),
         ['#', rest @ ..] => {
             let mut toks = rest;
             loop {
@@ -198,7 +202,7 @@ fn tokenise_typename<'a>(input: &'a [char], line_number: usize) -> Option<(Token
         _ => "".to_string(),
     };
     let mut input = input;
-    let cannot_contain = "{}\"(),;.:".chars().collect::<Vec<char>>();
+    let cannot_contain = "{}\"(),;.:[]".chars().collect::<Vec<char>>();
     let cannot_contain = cannot_contain.as_slice();
 
     while let [c, rest @ ..] = input {
@@ -222,7 +226,7 @@ fn tokenise_symbol<'a>(input: &'a [char], line_number: usize) -> Option<(Token, 
         _ => "".to_string(),
     };
     let mut input = input;
-    let cannot_contain = "{}\"(),;.:".chars().collect::<Vec<char>>();
+    let cannot_contain = "{}\"(),;.:[]".chars().collect::<Vec<char>>();
     let cannot_contain = cannot_contain.as_slice();
 
     while let [c, rest @ ..] = input {
@@ -277,7 +281,7 @@ fn update_keyword(token: Token) -> Token {
                 "actor" => TokenKind::Actor,
                 "daemon" => TokenKind::Daemon,
                 "send" => TokenKind::Send,
-                "forall" => TokenKind::Send,
+                "forall" => TokenKind::Forall,
                 "return" => TokenKind::Return,
                 "false" => TokenKind::False,
                 "true" => TokenKind::True,

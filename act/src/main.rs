@@ -32,11 +32,6 @@ fn main() {
     }
 }
 
-fn test_typechecking(tokens: &[(TokenKind, usize)]) {
-    let cst = cst::parse(tokens).unwrap();
-    TypeChecker::validate_prog(cst, vec![]).unwrap();
-}
-
 fn compile() -> Result<(), String> {
     let args = Args::parse();
     let path = PathBuf::from_str(&args.file).map_err(|_| "Could not parse file name")?;
@@ -59,8 +54,9 @@ fn compile() -> Result<(), String> {
         .collect();
 
     let tokenised = tokenize_all(input.as_slice()).ok_or("Error tokenising")?;
-    test_typechecking(&tokenised);
     let tree = cst::parse(&tokenised).map_err(|e| format!("Error parsing: {e:?}"))?;
+    TypeChecker::validate_prog(tree.clone(), vec![])
+        .map_err(|e| format!("Error during validation: {e}"))?;
 
     gen_cranelift(tree, args.debug, &format!("{stem}.o"))?;
 

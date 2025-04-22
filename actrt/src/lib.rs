@@ -27,6 +27,11 @@ pub extern "C" fn make_actor(
 }
 
 #[no_mangle]
+pub extern "C" fn make_gc_unit(rt: &RT) -> Gc {
+    rt.make_gc(Value::Unit)
+}
+
+#[no_mangle]
 pub extern "C" fn make_actor_global(
     init: extern "C" fn(&RT) -> Gc,
     update: extern "C" fn(&RT, Gc, Gc) -> Gc,

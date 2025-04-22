@@ -97,7 +97,6 @@ pub struct Compiler {
     data_description: DataDescription,
     module: ObjectModule,
     actors: Vec<Actor>,
-    daemons: Vec<Actor>,
     literal_counter: usize,
     globals: BTreeSet<String>,
     pub debug: bool,
@@ -131,7 +130,6 @@ impl Default for Compiler {
             data_description: DataDescription::new(),
             module,
             actors: Vec::default(),
-            daemons: Vec::default(),
             literal_counter: 0,
             globals: BTreeSet::default(),
             debug: false,
@@ -330,19 +328,14 @@ impl Compiler {
     }
 
     fn translate(&mut self, params: Vec<String>, stmts: Vec<Statement>) -> Result<(), ModuleError> {
-        // Our toy language currently only supports I64 values, though Cranelift
-        // supports other types.
         let int = self.module.target_config().pointer_type();
 
         for _p in &params {
             self.ctx.func.signature.params.push(AbiParam::new(int));
         }
 
-        // Our toy language currently only supports one return value, though
-        // Cranelift is designed to support more.
         self.ctx.func.signature.returns.push(AbiParam::new(int));
 
-        // Create the builder to build a function.
         let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_ctx);
 
         // Create the entry block, to start emitting code in.
@@ -380,10 +373,18 @@ impl Compiler {
             ret_block,
         };
 
-        let _ = stmts
+        let returns = stmts
             .into_iter()
             .map(|s| trans.translate_stmt(s))
             .any(identity);
+
+        // We can guarantee that if a function has ANY path that doesnt return, the actor's state
+        // type must be Unit
+        if !returns {
+            let rt = trans.translate_expr(Expr::Symbol(String::from("RUNTIME")));
+            let unit = trans.translate_call("make_gc_unit".to_string(), vec![rt]);
+            trans.builder.ins().jump(trans.ret_block, &[unit]);
+        }
 
         trans
             .builder
@@ -584,6 +585,7 @@ impl<'a> FunctionTranslator<'a> {
                 let name = infix_func_name(op);
                 self.translate_call(name, args)
             }
+            Expr::ForallElim { expr, args: _ } => self.translate_expr(*expr),
         }
     }
 

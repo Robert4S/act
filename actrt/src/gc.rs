@@ -60,6 +60,7 @@ pub enum Value {
     List(Vec<Gc>),
     Pid(Pid),
     Undefined(Undefined),
+    Unit,
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +94,7 @@ impl Value {
             ),
             Value::Pid(pid) => format!("PID({})", &pid.0),
             Value::Undefined(_) => "Undefined".to_string(),
+            Value::Unit => "()".to_string(),
         }
     }
     pub fn mark(&self, runtime: &RT, marks: &mut Vec<Gc>) {
@@ -107,6 +109,7 @@ impl Value {
             }
             Self::Pid(num) => runtime.find_reachable_vals(num, marks),
             Self::Undefined(_) => (),
+            Self::Unit => (),
         }
     }
 
@@ -120,6 +123,7 @@ impl Value {
                 .iter()
                 .zip(l2.iter())
                 .all(|(v1, v2)| runtime.deref_gc(v1).equals(runtime.deref_gc(v2), runtime)),
+            (Self::Unit, Self::Unit) => true,
             _ => false,
         }
     }

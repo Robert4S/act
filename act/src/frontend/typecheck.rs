@@ -1,8 +1,8 @@
 use super::{
-    cst::{Actor, Expr, Forall, Statement, TypeExpr},
+    cst::{Actor, Expr, Forall, Statement, TypeExpr, Update},
     tokenise::InfixToken,
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Display};
 
 pub struct TypeChecker {
     globals: HashMap<String, TypeExpr>,
@@ -14,16 +14,24 @@ impl TypeChecker {
     fn new(actors: &[Actor], constructors: Vec<(String, Forall)>) -> Self {
         let mut globals = HashMap::with_capacity(actors.len());
         for actor in actors {
-            globals.insert(
-                actor.name.clone(),
-                TypeExpr::Actor(Box::new(actor.update.inp_type.clone())),
-            );
+            globals.insert(actor.name.clone(), Self::actor_type(actor.update.clone()));
         }
         let constructors = constructors.into_iter().collect();
         Self {
             globals,
             constructors,
             blocks: Vec::new(),
+        }
+    }
+
+    fn actor_type(updater: Update) -> TypeExpr {
+        if updater.t_vars.len() > 0 {
+            TypeExpr::Forall(Forall {
+                vars: updater.t_vars,
+                then: Box::new(TypeExpr::Actor(Box::new(updater.inp_type))),
+            })
+        } else {
+            TypeExpr::Actor(Box::new(updater.inp_type))
         }
     }
 
@@ -39,11 +47,61 @@ impl TypeChecker {
 #[derive(Debug, Clone)]
 pub enum Error {
     UnboundVar(String),
-    Mismatched { want: TypeExpr, got: TypeExpr },
+    Mismatched {
+        want: TypeExpr,
+        got: TypeExpr,
+        expr: Expr,
+    },
     UnboundConstructor(String),
     BlockFinalised,
     InitReturnMissing(String),
     UpdateReturnMissing(String),
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::UnboundVar(s) => write!(f, "Unbound variable {s}"),
+            Error::Mismatched { want, got, expr } => write!(f, "{expr:?} was expected to have type {want}, but instead has type {got}"),
+            Error::UnboundConstructor(s) => write!(f, "Unbound type constructor {s}"),
+            Error::BlockFinalised => panic!(),
+            Error::InitReturnMissing(name) => write!(f, "Actor {name}'s initialiser includes an implicit return, but it's return type is not Unit"),
+            Error::UpdateReturnMissing(name) => write!(f, "Actor {name}'s updater includes an implicit return, but it's return type is not Unit"),
+        }
+    }
+}
+
+impl Display for TypeExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TypeExpr::Base(n) => write!(f, "{n}"),
+            TypeExpr::Actor(type_expr) => write!(f, "Pid({type_expr})"),
+            TypeExpr::Forall(forall) => write!(
+                f,
+                "forall ({}). {}",
+                typevar_arg_list(&forall.vars),
+                forall.then
+            ),
+            TypeExpr::TypeVar(n) => write!(f, "'{n}"),
+            TypeExpr::Constructor { name, args } => write!(f, "{name}({})", type_arg_list(&args)),
+        }
+    }
+}
+
+fn typevar_arg_list(args: &[String]) -> String {
+    let [first, args @ ..] = args else {
+        return String::new();
+    };
+    args.iter()
+        .fold(first.clone(), |acc, arg| format!("{acc}, {arg}"))
+}
+
+fn type_arg_list(args: &[TypeExpr]) -> String {
+    let [first, args @ ..] = args else {
+        return String::new();
+    };
+    args.iter()
+        .fold(first.to_string(), |acc, arg| format!("{acc}, {arg}"))
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -100,6 +158,16 @@ impl TypeChecker {
         }
     }
 
+    fn elim_forall(&self, args: Vec<TypeExpr>, forall: Forall) -> Result<TypeExpr> {
+        let arg_pairs = forall.vars.into_iter().zip(args.into_iter());
+
+        let mut subbed = *forall.then;
+        for (name, arg) in arg_pairs {
+            subbed = self.substitute_typevar(subbed, arg, name)?;
+        }
+        Ok(self.simplify(subbed)?)
+    }
+
     fn simplify(&self, type_: TypeExpr) -> Result<TypeExpr> {
         match type_ {
             TypeExpr::Base(_) => Ok(type_),
@@ -110,15 +178,24 @@ impl TypeChecker {
             TypeExpr::TypeVar(_) => Ok(type_),
             TypeExpr::Constructor { name, args } => {
                 let constr = self.get_constructor(&name)?;
-                let arg_pairs = constr.vars.into_iter().zip(args.into_iter());
-
-                let mut subbed = *constr.then;
-                for (name, arg) in arg_pairs {
-                    subbed = self.substitute_typevar(subbed, arg, name)?;
-                }
-                self.simplify(subbed)
+                self.elim_forall(args, constr)
             }
             TypeExpr::Actor(t) => Ok(TypeExpr::Actor(Box::new(self.simplify(*t)?))),
+        }
+    }
+
+    fn types_match(&self, have_e: Expr, have: TypeExpr, want: TypeExpr) -> Result<()> {
+        let have_s = self.simplify(have)?;
+        let want_s = self.simplify(want)?;
+
+        if have_s != want_s {
+            Err(Error::Mismatched {
+                want: want_s,
+                got: have_s,
+                expr: have_e,
+            })
+        } else {
+            Ok(())
         }
     }
 
@@ -128,13 +205,8 @@ impl TypeChecker {
         }
         match stmt {
             Statement::Assignment(a) => {
-                let right_type = self.expr_type(a.right)?;
-                if right_type != a.type_ {
-                    return Err(Error::Mismatched {
-                        want: a.type_,
-                        got: right_type,
-                    });
-                }
+                let right_type = self.expr_type(a.right.clone())?;
+                self.types_match(a.right, right_type, a.type_.clone())?;
                 self.declare_var(a.left, a.type_)?;
                 Ok(())
             }
@@ -143,60 +215,53 @@ impl TypeChecker {
                 args: _,
             } => Ok(()),
             Statement::Return(expr) => {
-                let got_t = self.expr_type(expr)?;
+                let got_t = self.expr_type(expr.clone())?;
                 let ret_t = self.current_block().return_type.clone();
-                if ret_t == got_t {
-                    self.current_block_mut().finalised = true;
-                    Ok(())
-                } else {
-                    Err(Error::Mismatched {
-                        want: ret_t,
-                        got: got_t,
-                    })
+                match self.types_match(expr, got_t, ret_t) {
+                    Ok(()) => {
+                        self.current_block_mut().finalised = true;
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
                 }
             }
             Statement::Actor(a) => self.validate_actor(a),
             Statement::Daemon(_) => panic!("Daemons are not supported"),
             Statement::Send { destination, value } => {
-                let sent_t = self.expr_type(value)?;
-                let dest_t = self.expr_type(destination)?;
-                let dest_t_arg = match dest_t {
+                let sent_t = self.expr_type(value.clone())?;
+                let dest_t = self.expr_type(destination.clone())?;
+                let dest_t_arg = match dest_t.clone() {
                     TypeExpr::Actor(a) => *a,
                     _ => {
                         return Err(Error::Mismatched {
                             want: TypeExpr::Actor(Box::new(sent_t.clone())),
                             got: dest_t,
+                            expr: destination,
                         })
                     }
                 };
-                if sent_t == dest_t_arg {
-                    Ok(())
-                } else {
-                    Err(Error::Mismatched {
-                        want: dest_t_arg,
-                        got: sent_t,
-                    })
-                }
+                self.types_match(value, sent_t, dest_t_arg)
             }
             Statement::If {
                 condition,
                 body,
                 otherwise,
             } => {
-                if self.expr_type(condition)? == base_type("Bool") {
-                    let then_term = self.validate_block(body.iter().cloned())?;
-                    let else_term = if let Some(otherwise) = otherwise {
-                        self.validate_block(otherwise.iter().cloned())?
-                    } else {
-                        false
-                    };
-                    if then_term && else_term {
-                        self.current_block_mut().finalised = true;
-                    }
-                    Ok(())
+                self.types_match(
+                    condition.clone(),
+                    self.expr_type(condition)?,
+                    base_type("Bool"),
+                )?;
+                let then_term = self.validate_block(body.iter().cloned())?;
+                let else_term = if let Some(otherwise) = otherwise {
+                    self.validate_block(otherwise.iter().cloned())?
                 } else {
-                    Ok(())
+                    false
+                };
+                if then_term && else_term {
+                    self.current_block_mut().finalised = true;
                 }
+                Ok(())
             }
         }
     }
@@ -230,14 +295,36 @@ impl TypeChecker {
             Expr::String(_) => Ok(base_type("String")),
             Expr::Symbol(s) => self.var_type(&s).cloned(),
             Expr::Infix { left, op, right } => {
-                let left = self.expr_type(*left)?;
-                let right = self.expr_type(*right)?;
-                self.infix_type(&left, &right, op)
+                let left_t = self.expr_type(*left.clone())?;
+                let right_t = self.expr_type(*right.clone())?;
+                self.infix_type(&left_t, &right_t, op, *left, *right)
+            }
+            Expr::ForallElim { expr, args } => {
+                let wanted_t = TypeExpr::Forall(Forall {
+                    vars: (0..(args.len())).map(|n| format!("'a{n}")).collect(),
+                    then: Box::new(base_type("...")),
+                });
+                match self.expr_type(*expr.clone())? {
+                    TypeExpr::Forall(forall) => self.elim_forall(args, forall),
+                    other => Err(Error::Mismatched {
+                        want: wanted_t,
+                        got: other,
+                        expr: *expr,
+                    }),
+                }
             }
         }
+        .and_then(|t| self.simplify(t))
     }
 
-    fn infix_type(&self, left: &TypeExpr, right: &TypeExpr, op: InfixToken) -> Result<TypeExpr> {
+    fn infix_type(
+        &self,
+        left: &TypeExpr,
+        right: &TypeExpr,
+        op: InfixToken,
+        left_e: Expr,
+        right_e: Expr,
+    ) -> Result<TypeExpr> {
         let (left_t, right_t, out_t) = match op {
             InfixToken::Plus | InfixToken::Minus | InfixToken::Mul | InfixToken::Div => {
                 (base_type("Num"), base_type("Num"), base_type("Num"))
@@ -255,6 +342,7 @@ impl TypeChecker {
                     return Err(Error::Mismatched {
                         want: left.clone(),
                         got: right.clone(),
+                        expr: right_e,
                     });
                 }
             }
@@ -266,6 +354,7 @@ impl TypeChecker {
             return Err(Error::Mismatched {
                 want: left_t,
                 got: left.clone(),
+                expr: left_e,
             });
         }
 
@@ -273,6 +362,7 @@ impl TypeChecker {
             return Err(Error::Mismatched {
                 want: right_t,
                 got: right.clone(),
+                expr: right_e,
             });
         }
 

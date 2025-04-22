@@ -2,6 +2,10 @@ actor sum {
 	state acc: Num;
 
 	initialiser {
+		send(println[String], "Hello, world!");
+		send(println[Num], 69420);
+		send(println[Bool], false);
+		send(println[Pid(Num)], sum);
 		send(call_me, sum);
 		return 0;
 	}
@@ -14,6 +18,16 @@ actor sum {
 		};
 		send(call_me, sum);
 		return acc + num;
+	}
+}
+
+actor println {
+	state t: Unit;
+	initialiser {}
+
+	update['a] (msg: 'a) {
+		intrinsic(print_value, msg);
+		intrinsic(print_value, "\n");
 	}
 }
 
