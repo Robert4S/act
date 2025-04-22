@@ -1,0 +1,4 @@
+#!/bin/sh
+cargo build --release
+cp ./target/release/act $HOME/.local/bin
+cp ./target/release/libact.a $HOME/.local/lib

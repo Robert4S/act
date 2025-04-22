@@ -1,0 +1,51 @@
+actor factorial {
+        state accumulator: Num;
+	initialiser {
+            send(factorial, 8);
+            return 1;
+        }
+
+        update (message: Num) {
+            if (message <= 1) {
+	        intrinsic(print_value, " Accumulator: ");
+	        intrinsic(print_value, accumulator);
+	        intrinsic(print_value, "\n");
+
+                return accumulator;
+            };
+            send(factorial, message - 1);
+            return message * accumulator;
+	}
+}
+
+actor summing {
+	state sum: Num;
+
+	initialiser {
+		send(summing, 100);
+		return 0;
+	}
+
+	update (num: Num) {
+		if (num <= 0) {
+			return sum;
+		};
+		send(summing, num - 1);
+		return num + sum;
+	}
+}
+
+actor print {
+	state t: Num;
+
+	initialiser {
+		return 0;
+	}
+
+	update (arg: Num) {
+		intrinsic(print_value, "Printing value ");
+		intrinsic(print_value, arg);
+		intrinsic(print_value, "\n");
+		return 0;
+	}
+}

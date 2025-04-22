@@ -1,0 +1,19 @@
+actor summing {
+	state sum: Num;
+
+	initialiser {
+		send(summing, 10000);
+		return 0;
+	}
+
+	update (num: Num) {
+		if (num <= 0) {
+			intrinsic(print_value, sum);
+			intrinsic(print_value, "\n");
+			return sum;
+		};
+		minused: Num = num - 1;
+		send(summing, minused);
+		return num + sum;
+	}
+}

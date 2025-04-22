@@ -1,0 +1,45 @@
+actor sum {
+	state acc: Num;
+
+	initialiser {
+		send(println[String], "Hello, world!");
+		send(println[Num], 69420);
+		send(println[Bool], false);
+		send(println[Pid(Num)], sum);
+		send(call_me, sum);
+		return 0;
+	}
+
+	update (num: Num) {
+		if (num <= 0) {
+			intrinsic(print_value, acc);
+			intrinsic(print_value, "\n");
+			return acc;
+		};
+		send(call_me, sum);
+		return acc + num;
+	}
+}
+
+actor println {
+	state t: Unit;
+	initialiser {}
+
+	update['a] (msg: 'a) {
+		intrinsic(print_value, msg);
+		intrinsic(print_value, "\n");
+	}
+}
+
+actor call_me {
+	state not_mine: Num;
+
+	initialiser {
+		return 10000;
+	}
+	
+	update (who: Pid(Num)) {
+		send(who, not_mine);
+		return not_mine - 1;
+	}
+}

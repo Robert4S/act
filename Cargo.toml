@@ -1,0 +1,13 @@
+[package]
+name = "act"
+version = "0.5.0"
+edition = "2021"
+
+[lib]
+crate-type=["staticlib"]
+
+[dependencies]
+clap = { version = "4.5.35", features = ["derive"] }
+cranelift = { version = "0.118.0", features = ["module", "object", "native"] }
+im = "15.1.0"
+rayon = "1.10.0"
