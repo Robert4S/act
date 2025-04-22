@@ -269,7 +269,11 @@ impl TypeChecker {
     fn validate_block(&mut self, stmts: impl Iterator<Item = Statement>) -> Result<bool> {
         self.push_block();
         for s in stmts {
-            self.validate_stmt(s)?;
+            match self.validate_stmt(s) {
+                Err(Error::BlockFinalised) => break,
+                Err(e) => return Err(e),
+                _ => continue,
+            }
         }
         let terminates = self.current_block().finalised;
         self.pop_block();
