@@ -44,7 +44,7 @@ pub enum TokenKind {
     EOF,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InfixToken {
     Plus,
     Minus,
@@ -79,6 +79,7 @@ pub fn tokenize<'a>(input: &'a [char], line_number: usize) -> Option<(Token, Vec
         // Characters
         ['(', rest @ ..] => Some(((TokenKind::Lparen, line_number), rest.to_owned())),
         [')', rest @ ..] => Some(((TokenKind::Rparen, line_number), rest.to_owned())),
+        ['∀', rest @ ..] => Some(((TokenKind::Forall, line_number), rest.to_owned())),
         ['{', rest @ ..] => Some(((TokenKind::Lbrac, line_number), rest.to_owned())),
         ['}', rest @ ..] => Some(((TokenKind::Rbrac, line_number), rest.to_owned())),
         [',', rest @ ..] => Some(((TokenKind::Comma, line_number), rest.to_owned())),
@@ -281,7 +282,7 @@ fn update_keyword(token: Token) -> Token {
                 "actor" => TokenKind::Actor,
                 "daemon" => TokenKind::Daemon,
                 "send" => TokenKind::Send,
-                "forall" => TokenKind::Forall,
+                "for" => TokenKind::Forall,
                 "return" => TokenKind::Return,
                 "false" => TokenKind::False,
                 "true" => TokenKind::True,

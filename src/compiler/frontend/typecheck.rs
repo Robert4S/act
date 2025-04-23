@@ -1,17 +1,27 @@
 use super::{
-    cst::{Actor, Expr, Forall, Statement, TypeExpr, Update},
+    cst::{Actor, Expr, Forall, ForallElim, Statement, TypeExpr, Update},
     tokenise::InfixToken,
 };
 use std::{collections::HashMap, fmt::Display};
 
+enum Kind {
+    Type,
+    Constructor { args: Vec<()> },
+}
+
 pub struct TypeChecker {
     globals: HashMap<String, TypeExpr>,
     blocks: Vec<Block>,
-    constructors: HashMap<String, Forall>,
+    constructors: HashMap<String, Forall<TypeExpr>>,
+    aliases: HashMap<String, TypeExpr>,
 }
 
 impl TypeChecker {
-    fn new(actors: &[Actor], constructors: Vec<(String, Forall)>) -> Self {
+    pub fn new(
+        actors: &[Actor],
+        constructors: Vec<(String, Forall<TypeExpr>)>,
+        aliases: Vec<(String, TypeExpr)>,
+    ) -> Self {
         let mut globals = HashMap::with_capacity(actors.len());
         for actor in actors {
             globals.insert(actor.name.clone(), Self::actor_type(actor.update.clone()));
@@ -21,6 +31,7 @@ impl TypeChecker {
             globals,
             constructors,
             blocks: Vec::new(),
+            aliases: aliases.into_iter().collect(),
         }
     }
 
@@ -35,12 +46,19 @@ impl TypeChecker {
         }
     }
 
-    pub fn validate_prog(actors: Vec<Actor>, constructors: Vec<(String, Forall)>) -> Result<()> {
-        let mut tc = Self::new(&actors, constructors);
+    pub fn validate_prog(
+        actors: Vec<Actor>,
+        constructors: Vec<(String, Forall<TypeExpr>)>,
+        aliases: Vec<(String, TypeExpr)>,
+    ) -> Result<Self> {
+        let mut tc = Self::new(&actors, constructors, aliases.clone());
+        for alias in aliases {
+            tc.ensure_type(alias.1)?;
+        }
         for actor in actors {
             tc.validate_actor(actor)?;
         }
-        Ok(())
+        Ok(tc)
     }
 }
 
@@ -56,6 +74,13 @@ pub enum Error {
     BlockFinalised,
     InitReturnMissing(String),
     UpdateReturnMissing(String),
+    NonConcreteForallBody(Forall<TypeExpr>),
+    ApplicationToConcreteType(ForallElim<TypeExpr>),
+    WrongForallElimArity {
+        given: Vec<TypeExpr>,
+        to: TypeExpr,
+    },
+    ExpectedConcrete(TypeExpr),
 }
 
 impl Display for Error {
@@ -67,6 +92,11 @@ impl Display for Error {
             Error::BlockFinalised => panic!(),
             Error::InitReturnMissing(name) => write!(f, "Actor {name}'s initialiser includes an implicit return, but it's return type is not Unit"),
             Error::UpdateReturnMissing(name) => write!(f, "Actor {name}'s updater includes an implicit return, but it's return type is not Unit"),
+            Error::NonConcreteForallBody(forall) => write!(f, "Expected concrete type, got {}", TypeExpr::Forall(forall.clone()).to_string()),
+            Error::ApplicationToConcreteType(ForallElim { expr, args }) => write!(f, "Expected {expr} to be a constructor to be applied to {}", type_arg_list(args)),
+            Error::WrongForallElimArity { given: _, to: _ } => write!(f, "{:?}", self),
+            Error::ExpectedConcrete(type_expr) => write!(f, "Expected {type_expr} to be a concrete type"),
+
         }
     }
 }
@@ -83,7 +113,12 @@ impl Display for TypeExpr {
                 forall.then
             ),
             TypeExpr::TypeVar(n) => write!(f, "'{n}"),
-            TypeExpr::Constructor { name, args } => write!(f, "{name}({})", type_arg_list(&args)),
+            TypeExpr::ForallElim(forall_elim) => write!(
+                f,
+                "{}[{}]",
+                *forall_elim.expr,
+                type_arg_list(&forall_elim.args)
+            ),
         }
     }
 }
@@ -111,6 +146,41 @@ fn base_type(name: &str) -> TypeExpr {
 }
 
 impl TypeChecker {
+    fn type_kind(&self, type_: TypeExpr) -> Result<Kind> {
+        match type_ {
+            TypeExpr::Base(name) => {
+                if let Some(c) = self.constructors.get(&name) {
+                    self.type_kind(TypeExpr::Forall(c.clone()))
+                } else {
+                    Ok(Kind::Type)
+                }
+            }
+            TypeExpr::Actor(_) => Ok(Kind::Type),
+            TypeExpr::Forall(forall) => {
+                if let Kind::Constructor { args: _ } = self.type_kind(*forall.then.clone())? {
+                    return Err(Error::NonConcreteForallBody(forall));
+                }
+                Ok(Kind::Constructor {
+                    args: forall.vars.iter().map(|_| ()).collect(),
+                })
+            }
+            TypeExpr::ForallElim(forall_elim) => match self.type_kind(*forall_elim.expr.clone())? {
+                Kind::Type => Err(Error::ApplicationToConcreteType(forall_elim)),
+                Kind::Constructor { args } => {
+                    if &args != &forall_elim.args.iter().map(|_| ()).collect::<Vec<()>>() {
+                        Err(Error::WrongForallElimArity {
+                            given: forall_elim.args,
+                            to: *forall_elim.expr,
+                        })
+                    } else {
+                        Ok(Kind::Type)
+                    }
+                }
+            },
+            TypeExpr::TypeVar(_) => Ok(Kind::Type),
+        }
+    }
+
     fn current_block(&self) -> &Block {
         self.blocks.last().as_ref().unwrap()
     }
@@ -125,11 +195,11 @@ impl TypeChecker {
         Ok(())
     }
 
-    fn create_constructor(&mut self, name: String, body: Forall) {
+    fn create_constructor(&mut self, name: String, body: Forall<TypeExpr>) {
         self.constructors.insert(name, body);
     }
 
-    fn get_constructor(&self, name: &str) -> Result<Forall> {
+    fn get_constructor(&self, name: &str) -> Result<Forall<TypeExpr>> {
         self.constructors
             .get(name)
             .ok_or(Error::UnboundConstructor(name.to_string()))
@@ -147,18 +217,18 @@ impl TypeChecker {
             TypeExpr::TypeVar(n) if n == var_name => Ok(with),
             TypeExpr::TypeVar(_) => Ok(into),
             TypeExpr::Forall(f) => self.substitute_typevar(*f.then, with, var_name),
-            TypeExpr::Constructor { name: _, args: _ } => {
-                let simplified = self.simplify(into)?;
-                self.substitute_typevar(simplified, with, var_name)
-            }
             TypeExpr::Actor(texpr) => {
                 let subbed = self.substitute_typevar(*texpr, with, var_name)?;
                 Ok(TypeExpr::Actor(Box::new(subbed)))
             }
+            TypeExpr::ForallElim(_) => {
+                let simplified = self.simplify(into)?;
+                self.substitute_typevar(simplified, with, var_name)
+            }
         }
     }
 
-    fn elim_forall(&self, args: Vec<TypeExpr>, forall: Forall) -> Result<TypeExpr> {
+    fn elim_forall(&self, args: Vec<TypeExpr>, forall: Forall<TypeExpr>) -> Result<TypeExpr> {
         let arg_pairs = forall.vars.into_iter().zip(args.into_iter());
 
         let mut subbed = *forall.then;
@@ -170,17 +240,26 @@ impl TypeChecker {
 
     fn simplify(&self, type_: TypeExpr) -> Result<TypeExpr> {
         match type_ {
-            TypeExpr::Base(_) => Ok(type_),
+            TypeExpr::Base(name) => {
+                if let Ok(f) = self.get_constructor(&name) {
+                    Ok(TypeExpr::Forall(f))
+                } else {
+                    Ok(TypeExpr::Base(name))
+                }
+            }
             TypeExpr::Forall(Forall { vars, then }) => Ok(TypeExpr::Forall(Forall {
                 vars,
                 then: Box::new(self.simplify(*then)?),
             })),
             TypeExpr::TypeVar(_) => Ok(type_),
-            TypeExpr::Constructor { name, args } => {
-                let constr = self.get_constructor(&name)?;
-                self.elim_forall(args, constr)
-            }
             TypeExpr::Actor(t) => Ok(TypeExpr::Actor(Box::new(self.simplify(*t)?))),
+            TypeExpr::ForallElim(forall_elim) => {
+                let f = match self.simplify(*forall_elim.expr.clone())? {
+                    TypeExpr::Forall(f) => f,
+                    _ => return Err(Error::ApplicationToConcreteType(forall_elim)),
+                };
+                self.elim_forall(forall_elim.args, f)
+            }
         }
     }
 
@@ -196,6 +275,13 @@ impl TypeChecker {
             })
         } else {
             Ok(())
+        }
+    }
+
+    fn ensure_type(&self, type_: TypeExpr) -> Result<()> {
+        match self.type_kind(type_.clone())? {
+            Kind::Constructor { args: _ } => Err(Error::ExpectedConcrete(type_)),
+            Kind::Type => Ok(()),
         }
     }
 
@@ -292,7 +378,19 @@ impl TypeChecker {
         self.blocks.pop().unwrap()
     }
 
-    fn expr_type(&self, expr: Expr) -> Result<TypeExpr> {
+    pub fn eq_func_name(&self, type_: TypeExpr) -> Result<String> {
+        let res = match type_ {
+            TypeExpr::Base(n) => format!("eval_eq_{}", n.to_lowercase()),
+            TypeExpr::Actor(_) => format!("eval_eq_pid"),
+            TypeExpr::Forall(_) => return Err(Error::ExpectedConcrete(type_)),
+            TypeExpr::ForallElim(_) => self.eq_func_name(self.simplify(type_)?)?,
+            TypeExpr::TypeVar(_) => return Err(Error::ExpectedConcrete(type_)),
+        };
+
+        Ok(res)
+    }
+
+    pub fn expr_type(&self, expr: Expr) -> Result<TypeExpr> {
         match expr {
             Expr::Number(_) => Ok(base_type("Num")),
             Expr::Bool(_) => Ok(base_type("Bool")),
@@ -303,7 +401,7 @@ impl TypeChecker {
                 let right_t = self.expr_type(*right.clone())?;
                 self.infix_type(&left_t, &right_t, op, *left, *right)
             }
-            Expr::ForallElim { expr, args } => {
+            Expr::ForallElim(ForallElim { expr, args }) => {
                 let wanted_t = TypeExpr::Forall(Forall {
                     vars: (0..(args.len())).map(|n| format!("'a{n}")).collect(),
                     then: Box::new(base_type("...")),
@@ -316,6 +414,13 @@ impl TypeChecker {
                         expr: *expr,
                     }),
                 }
+            }
+            Expr::Forall(Forall { vars, then }) => {
+                let then_type = self.expr_type(*then)?;
+                Ok(TypeExpr::Forall(Forall {
+                    vars,
+                    then: Box::new(then_type),
+                }))
             }
         }
         .and_then(|t| self.simplify(t))

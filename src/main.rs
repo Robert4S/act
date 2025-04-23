@@ -5,8 +5,8 @@ mod compiler;
 use compiler::{
     cranegen,
     frontend::{
-        cst,
-        tokenise::{self, TokenKind},
+        cst::{self, Forall, TypeExpr},
+        tokenise,
         typecheck::TypeChecker,
     },
 };
@@ -56,10 +56,20 @@ fn compile() -> Result<(), String> {
 
     let tokenised = tokenize_all(input.as_slice()).ok_or("Error tokenising")?;
     let tree = cst::parse(&tokenised).map_err(|e| format!("Error parsing: {e:?}"))?;
-    TypeChecker::validate_prog(tree.clone(), vec![])
-        .map_err(|e| format!("Error during validation: {e}"))?;
+    let tc = TypeChecker::validate_prog(
+        tree.clone(),
+        vec![(
+            "Product".to_string(),
+            Forall {
+                vars: vec!["a".to_string(), "b".to_string()],
+                then: Box::new(TypeExpr::Base("Unit".to_string())),
+            },
+        )],
+        vec![],
+    )
+    .map_err(|e| format!("Error during validation: {e}"))?;
 
-    gen_cranelift(tree, args.debug, &format!("{stem}.o"))?;
+    gen_cranelift(tree, args.debug, &format!("{stem}.o"), tc)?;
 
     let home = env::var("HOME").unwrap();
 
@@ -68,6 +78,7 @@ fn compile() -> Result<(), String> {
         .arg(stem.to_string())
         .arg(&format!("./{stem}.o"))
         .arg(format!("{home}/.local/lib/libact.a"))
+        .arg("-lm")
         .status()
         .map_err(|_| "It seems you do not have GCC installed".to_string())
         .map(|_| ())?;
@@ -79,8 +90,9 @@ fn compile() -> Result<(), String> {
     fs::rename(format!("{stem}"), format!("./act_bin/{stem}")).map_err(|e| e.to_string())
 }
 
-fn gen_cranelift(instrs: Cst, debug: bool, name: &str) -> Result<(), String> {
+fn gen_cranelift(instrs: Cst, debug: bool, name: &str, tc: TypeChecker) -> Result<(), String> {
     let mut compiler = Compiler::default();
+    compiler.typechecker = tc;
 
     compiler.debug = debug;
 

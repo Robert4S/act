@@ -1,12 +1,13 @@
 use rayon::{current_num_threads, prelude::*};
 
-use super::gc::{Allocator, Gc, Value};
+use super::gc::{Alloc, Gc, HeaderTag};
+use parking_lot::Mutex;
 use std::{
-    collections::{BTreeSet, HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     process::exit,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
 };
 
@@ -52,9 +53,11 @@ impl RTActor {
     }
 
     fn ensure_init(&self) -> Gc {
-        match self.state {
-            ActorState::Uninit => panic!("Actor is unitialised upon call to ensure_init"),
-            ActorState::Init(gc) => gc,
+        debug_assert!(matches!(self.state, ActorState::Init(_)));
+        if let ActorState::Init(gc) = self.state {
+            gc
+        } else {
+            unsafe { std::hint::unreachable_unchecked() }
         }
     }
 
@@ -142,7 +145,7 @@ pub struct RT {
     mailboxes: Mutex<Mailboxes>,
     actors: Mutex<HashMap<Pid, RTActor>>,
     statics: Mutex<Vec<Gc>>,
-    allocator: Mutex<Allocator>,
+    allocator: Mutex<Alloc>,
     pid_counter: AtomicUsize,
     epoch: AtomicUsize,
 }
@@ -153,40 +156,32 @@ impl RT {
             mailboxes: Mutex::new(Mailboxes::new()),
             actors: Mutex::new(HashMap::new()),
             statics: Mutex::new(Vec::new()),
-            allocator: Mutex::new(Allocator::new()),
+            allocator: Mutex::new(Alloc::new()),
             pid_counter: AtomicUsize::new(0),
             epoch: AtomicUsize::new(0),
         }
     }
 
     pub fn make_static(&self, value: Gc) -> () {
-        self.statics.lock().unwrap().push(value);
+        self.statics.lock().push(value);
     }
 
     pub fn make_actor(&self, init: Init, update: Update) -> Pid {
         let actor = RTActor::new(init, update);
         let pid = self.pid_counter.fetch_add(1, Ordering::SeqCst);
         let pid = Pid(pid);
-        self.actors.lock().unwrap().insert(pid, actor);
-        self.mailboxes.lock().unwrap().add_pid(pid);
+        self.actors.lock().insert(pid, actor);
+        self.mailboxes.lock().add_pid(pid);
 
         pid
     }
 
-    pub fn make_gc(&self, value: Value) -> Gc {
-        let ptr = self.allocator.lock().unwrap().alloc(value);
-        Gc { ptr }
-    }
-
-    pub fn deref_gc(&self, ptr: &Gc) -> &Value {
-        unsafe {
-            let raw = self.allocator.lock().unwrap().get(ptr.ptr) as *const Value;
-            &*raw
-        }
+    pub fn make_gc(&self, tag: HeaderTag, size: u32) -> Gc {
+        self.allocator.lock().alloc(size, tag)
     }
 
     pub fn init_actors(&self) {
-        let mut actors = self.actors.lock().unwrap();
+        let mut actors = self.actors.lock();
         let pids: Vec<Pid> = actors.keys().cloned().collect();
 
         for pid in pids {
@@ -196,12 +191,13 @@ impl RT {
     }
 
     pub fn supervise(rt: Arc<Self>) {
+        let mut set = HashSet::new();
         loop {
-            let _ = rt.epoch.fetch_add(1, Ordering::SeqCst);
+            let e = rt.epoch.fetch_add(1, Ordering::SeqCst);
 
             // TODO: Make sure an actor does not get more than one message to respond to in each
             // scheduling epoch
-            let mut mailboxes = rt.mailboxes.lock().unwrap();
+            let mut mailboxes = rt.mailboxes.lock();
             let messages = mailboxes.pop_messages(current_num_threads());
 
             drop(mailboxes);
@@ -214,98 +210,82 @@ impl RT {
                 })
                 .collect();
 
-            let reachable = rt.live_values();
-
-            if rt.mailboxes.lock().unwrap().is_empty() {
-                rt.destruct();
-                exit(0);
+            unsafe {
+                if rt.allocator.make_guard_unchecked().heap_limit_reached() {
+                    rt.live_values(&mut set);
+                    rt.allocator.lock().free_nonreachable(&set);
+                    set.clear();
+                    rt.allocator
+                        .make_guard_unchecked()
+                        .update_heap_limit(2., 1e6 as usize);
+                }
+                if rt.mailboxes.make_guard_unchecked().is_empty() {
+                    rt.destruct();
+                    exit(0);
+                }
             }
-
-            rt.allocator.lock().unwrap().free_nonreachable(reachable);
         }
     }
 
     pub fn send_actor(&self, actor: Gc, value: Gc) {
-        let actor = self.deref_gc(&actor).clone();
-
-        match actor {
-            Value::Pid(p) => {
-                self.mailboxes.lock().unwrap().push_message(p, value);
-            }
-            other => panic!("{other:?} is not a PID"),
-        }
+        let actor = unsafe { actor.ptr::<Pid>().read() };
+        self.mailboxes.lock().push_message(actor, value);
     }
 
-    pub fn find_reachable_vals(&self, pid: &Pid, marks: &mut Vec<Gc>) {
-        let mailboxes = self.mailboxes.lock().unwrap();
+    pub fn find_reachable_vals(&self, pid: &Pid, marks: &mut HashSet<Gc>) {
+        let mailboxes = self.mailboxes.lock();
 
-        let mailbox = mailboxes.get_mailbox(pid.clone()).unwrap().clone();
+        let mailbox = unsafe {
+            mailboxes
+                .get_mailbox(pid.clone())
+                .unwrap_unchecked()
+                .clone()
+        };
 
         drop(mailboxes);
 
         for value in mailbox {
-            value.mark(self, marks);
+            Alloc::mark(value, self, marks);
         }
 
-        self.actor_state(pid).mark(self, marks);
+        let state = self.actor_state(pid);
+        Alloc::mark(state, self, marks);
     }
 }
 
 impl RT {
     fn destruct(&self) {
         ()
-        //let actors = self.actors.lock().unwrap();
-        //let states: Vec<(Pid, Value)> = actors
-        //    .iter()
-        //    .map(|(pid, actor)| (pid.clone(), self.deref_gc(&actor.ensure_init()).clone()))
-        //    .collect();
-
-        //drop(actors);
-
-        //for (pid, final_state) in states {
-        //    println!(
-        //        "PID({}) finished with {}",
-        //        pid.0,
-        //        final_state.to_string(self)
-        //    );
-        //}
     }
 
     fn update_actor(&self, pid: Pid, message: Gc) -> Gc {
-        let actor = self.actors.lock().unwrap().get(&pid).unwrap().clone();
+        let actor = unsafe { self.actors.lock().get(&pid).unwrap_unchecked().clone() };
         let new_actor = actor.update(message, self);
-        self.actors.lock().unwrap().insert(pid, new_actor.clone());
+        self.actors.lock().insert(pid, new_actor.clone());
         new_actor.ensure_init()
     }
 
-    pub fn dump_frees(&self) {
-        println!("{:?}", self.allocator.lock().unwrap().free);
-    }
-
     fn actor_state(&self, pid: &Pid) -> Gc {
-        self.actors.lock().unwrap().get(pid).unwrap().ensure_init()
+        unsafe { self.actors.lock().get(pid).unwrap_unchecked().ensure_init() }
     }
 
-    fn live_values(&self) -> Vec<Gc> {
-        let statics = self.statics.lock().unwrap();
+    fn live_values(&self, marks: &mut HashSet<Gc>) {
+        let statics = self.statics.lock();
         let statics_clone = statics.clone();
         drop(statics);
-        let mut marks = vec![];
 
         for static_var in statics_clone {
-            static_var.mark(self, &mut marks);
+            Alloc::mark(static_var, self, marks);
         }
 
-        let mailboxes = self.mailboxes.lock().unwrap();
+        let mailboxes = self.mailboxes.lock();
 
         let nonempty: Vec<Pid> = mailboxes.get_queue_deduped();
 
         drop(mailboxes);
 
         for pid in nonempty {
-            self.find_reachable_vals(&pid, &mut marks);
+            self.find_reachable_vals(&pid, marks);
         }
-
-        marks
     }
 }

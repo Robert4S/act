@@ -8,8 +8,7 @@ actor summing {
 
 	update (num: Num) {
 		if (num <= 0) {
-			intrinsic(print_value, sum);
-			intrinsic(print_value, "\n");
+			intrinsic(print_number, sum);
 			return sum;
 		};
 		minused: Num = num - 1;

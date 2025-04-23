@@ -1,253 +1,158 @@
-use core::panic;
-use std::collections::BTreeSet;
+use std::{
+    alloc::{alloc, dealloc, Layout},
+    collections::HashSet,
+    mem,
+};
 
 use super::runtime::{Pid, RT};
 
-#[derive(Debug)]
-pub struct Allocator {
-    pub values: Vec<Option<Value>>,
-    pub free: BTreeSet<usize>,
-}
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Gc(*mut u8);
 
-impl Allocator {
-    pub fn new() -> Self {
-        Self {
-            values: Vec::new(),
-            free: BTreeSet::new(),
-        }
-    }
-
-    pub fn free_nonreachable(&mut self, reachable: Vec<Gc>) {
-        let ptrs: BTreeSet<usize> = reachable.iter().map(|p| p.ptr).collect();
-        let nonreachable = (0..(self.values.len())).filter(|v| !ptrs.contains(v));
-        nonreachable.for_each(|ptr| self.free(ptr));
-    }
-
-    pub fn alloc(&mut self, value: Value) -> usize {
-        if let Some(idx) = self.free.pop_first() {
-            self.values[idx] = Some(value);
-            idx
-        } else {
-            self.values.push(Some(value));
-            self.values.len() - 1
-        }
-    }
-
-    #[inline(always)]
-    fn free(&mut self, idx: usize) {
-        self.values[idx] = None;
-        self.free.insert(idx);
-    }
-
-    pub unsafe fn get(&self, idx: usize) -> &Value {
-        // TODO: Change when debugging
-        self.values.get_unchecked(idx).as_ref().unwrap_unchecked()
-        //let reference = self
-        //    .values
-        //    .get(idx)
-        //    .expect(&format!("Yeah {idx} is not in the backing array bucko"));
-        //reference
-        //    .as_ref()
-        //    .expect(&format!("{idx} is not allocated"))
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum Value {
-    Number(f64),
-    String(String),
-    Bool(bool),
-    List(Vec<Gc>),
-    Pid(Pid),
-    Undefined(Undefined),
-    Unit,
-}
-
-#[derive(Clone, Debug)]
-pub enum Undefined {
-    Creation,
-    MakeUndefined,
-}
+unsafe impl Send for Gc {}
+unsafe impl Sync for Gc {}
 
 impl Gc {
-    pub fn mark(&self, runtime: &RT, marks: &mut Vec<Gc>) {
-        if marks.contains(self) {
-            return;
-        }
-        marks.push(self.clone());
-        let value = runtime.deref_gc(self).clone();
-        value.mark(runtime, marks);
+    pub fn ptr<T>(&self) -> *mut T {
+        self.0 as *mut T
     }
 }
 
-impl Value {
-    pub fn to_string(&self, runtime: &RT) -> String {
-        match self {
-            Value::Number(n) => n.to_string(),
-            Value::String(s) => s.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::List(vec) => format!(
-                "{:?}",
-                vec.iter()
-                    .map(|g| runtime.deref_gc(g).to_string(runtime))
-                    .collect::<Vec<_>>()
-            ),
-            Value::Pid(pid) => format!("PID({})", &pid.0),
-            Value::Undefined(_) => "Undefined".to_string(),
-            Value::Unit => "()".to_string(),
-        }
-    }
-    pub fn mark(&self, runtime: &RT, marks: &mut Vec<Gc>) {
-        match self {
-            Self::Number(_) => (),
-            Self::String(_) => (),
-            Self::Bool(_) => (),
-            Self::List(v) => {
-                for value in v {
-                    value.mark(runtime, marks);
-                }
-            }
-            Self::Pid(num) => runtime.find_reachable_vals(num, marks),
-            Self::Undefined(_) => (),
-            Self::Unit => (),
-        }
-    }
-
-    pub fn equals(&self, other: &Self, runtime: &RT) -> bool {
-        match (self, other) {
-            (Self::Number(n1), Self::Number(n2)) => n1 == n2,
-            (Self::Bool(b1), Self::Bool(b2)) => b1 == b2,
-            (Self::String(s1), Self::String(s2)) => s1 == s2,
-            (Self::Pid(p1), Self::Pid(p2)) => p1 == p2,
-            (Self::List(l1), Self::List(l2)) => l1
-                .iter()
-                .zip(l2.iter())
-                .all(|(v1, v2)| runtime.deref_gc(v1).equals(runtime.deref_gc(v2), runtime)),
-            (Self::Unit, Self::Unit) => true,
-            _ => false,
-        }
+impl From<*mut u8> for Gc {
+    fn from(value: *mut u8) -> Self {
+        Self(value)
     }
 }
 
 #[repr(C)]
-#[derive(Clone, Debug, Copy, PartialEq, Eq)]
-pub struct Gc {
-    pub ptr: usize,
+#[derive(Debug, Clone, Copy)]
+pub enum HeaderTag {
+    TraceBlock = 0,
+    Raw = 1,
+    Pid = 2,
 }
 
-impl Gc {
-    pub fn new(val: Value, runtime: &RT) -> Self {
-        runtime.make_gc(val)
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Header {
+    tag: HeaderTag,
+    size: u32,
+}
+
+impl Header {
+    fn new(size: u32, tag: HeaderTag) -> Self {
+        Self { size, tag }
+    }
+}
+
+#[derive(Debug)]
+pub struct Alloc {
+    allocs: HashSet<Gc>,
+    heap_limit: usize,
+    heap_size: usize,
+}
+
+impl Default for Alloc {
+    fn default() -> Self {
+        Self {
+            allocs: HashSet::new(),
+            heap_limit: 1e6 as usize,
+            heap_size: 0,
+        }
+    }
+}
+
+impl Alloc {
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn own_ptr(&self) -> usize {
-        self.ptr
+    pub fn update_heap_limit(&mut self, frac: f32, min_size: usize) {
+        let new_limit = (self.heap_size as f64) * frac as f64;
+        self.heap_limit = (new_limit.ceil() as usize).max(min_size);
     }
 
-    pub fn eval_ge(&self, rhs: Self, runtime: &RT) -> Gc {
-        let v1: &Value = runtime.deref_gc(self);
-        let v2: &Value = runtime.deref_gc(&rhs);
+    pub fn heap_limit_reached(&self) -> bool {
+        self.heap_size >= self.heap_limit
+    }
 
-        match (v1, v2) {
-            (Value::Number(n1), Value::Number(n2)) => Gc::new(Value::Bool(n1 >= n2), runtime),
-            _ => panic!("Mismatched types, expected numbers for ge, got {v1:?}, {v2:?}"),
+    pub fn free_nonreachable(&mut self, reachable: &HashSet<Gc>) {
+        let nonreachable = self
+            .allocs
+            .difference(&reachable)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for p in nonreachable {
+            self.free(p);
         }
     }
 
-    pub fn eval_greater(&self, rhs: Self, runtime: &RT) -> Gc {
-        let v1: &Value = runtime.deref_gc(self);
-        let v2: &Value = runtime.deref_gc(&rhs);
+    pub fn alloc(&mut self, size: u32, tag: HeaderTag) -> Gc {
+        let layout = Layout::from_size_align(mem::size_of::<Header>() + size as usize, 8).unwrap();
+        let header = Header::new(size, tag);
+        let data_ptr = unsafe {
+            let header_ptr = alloc(layout) as *mut Header;
+            header_ptr.write(header);
+            header_ptr.add(1) as *mut u8
+        };
+        self.heap_size += size as usize;
+        self.allocs.insert(data_ptr.into());
+        data_ptr.into()
+    }
 
-        match (v1, v2) {
-            (Value::Number(n1), Value::Number(n2)) => Gc::new(Value::Bool(n1 > n2), runtime),
-            _ => panic!("Mismatched types, expected numbers for greater"),
+    pub fn free(&mut self, data_ptr: Gc) {
+        if !self.allocs.remove(&data_ptr) {
+            panic!("Allocation {data_ptr:?} doesnt exist");
+        }
+        unsafe {
+            let header_ptr = data_ptr.ptr::<Header>().sub(1);
+            let size = header_ptr.read().size.clone();
+            let layout =
+                Layout::from_size_align(mem::size_of::<Header>() + size as usize, 8).unwrap();
+            dealloc(header_ptr as *mut u8, layout);
+            self.heap_size -= size as usize;
         }
     }
 
-    pub fn eval_le(&self, rhs: Self, runtime: &RT) -> Gc {
-        let v1: &Value = runtime.deref_gc(self);
-        let v2: &Value = runtime.deref_gc(&rhs);
-
-        match (v1, v2) {
-            (Value::Number(n1), Value::Number(n2)) => Gc::new(Value::Bool(n1 <= n2), runtime),
-            _ => panic!("Mismatched types, expected numbers for le, got {v1:?}, {v2:?}"),
+    pub fn mark(root: Gc, runtime: &RT, mark_set: &mut HashSet<Gc>) {
+        if mark_set.contains(&root) {
+            return;
+        }
+        mark_set.insert(root);
+        let header = unsafe { root.ptr::<Header>().sub(1).read() };
+        match header.tag {
+            HeaderTag::TraceBlock => Self::trace_region(root, header.size, runtime, mark_set),
+            HeaderTag::Raw => (),
+            HeaderTag::Pid => {
+                let pid_ptr = root.ptr::<Pid>();
+                unsafe {
+                    Self::mark_pid(pid_ptr.read(), runtime, mark_set);
+                }
+            }
         }
     }
 
-    pub fn eval_lesser(&self, rhs: Self, runtime: &RT) -> Gc {
-        let v1: &Value = runtime.deref_gc(self);
-        let v2: &Value = runtime.deref_gc(&rhs);
+    fn mark_pid(pid: Pid, runtime: &RT, mark_set: &mut HashSet<Gc>) {
+        runtime.find_reachable_vals(&pid, mark_set);
+    }
 
-        match (v1, v2) {
-            (Value::Number(n1), Value::Number(n2)) => Gc::new(Value::Bool(n1 < n2), runtime),
-            _ => panic!("Mismatched types, expected numbers for lesser"),
+    fn trace_region(root: Gc, size: u32, runtime: &RT, mark_set: &mut HashSet<Gc>) {
+        assert!(
+            size % 8 == 0,
+            "A trace region must be the size of a whole number of 64 bit pointers"
+        );
+        let mut offset = 0;
+        while offset < size {
+            unsafe {
+                Self::mark(root.0.add(offset as usize).into(), runtime, mark_set);
+            }
+            offset += 8;
         }
     }
 
-    pub fn eval_and(&self, rhs: Self, runtime: &RT) -> Gc {
-        let v1: &Value = runtime.deref_gc(self);
-        let v2: &Value = runtime.deref_gc(&rhs);
-
-        match (v1, v2) {
-            (Value::Bool(b1), Value::Bool(b2)) => Gc::new(Value::Bool(*b1 && *b2), runtime),
-            _ => panic!("Mismatched types, expected numbers for lesser"),
-        }
-    }
-
-    pub fn eval_or(&self, rhs: Self, runtime: &RT) -> Gc {
-        let v1: &Value = runtime.deref_gc(self);
-        let v2: &Value = runtime.deref_gc(&rhs);
-
-        match (v1, v2) {
-            (Value::Bool(b1), Value::Bool(b2)) => Gc::new(Value::Bool(*b1 || *b2), runtime),
-            _ => panic!("Mismatched types, expected numbers for lesser"),
-        }
-    }
-
-    pub fn eval_eq(&self, rhs: Self, runtime: &RT) -> Gc {
-        let v1: &Value = runtime.deref_gc(self);
-        let v2: &Value = runtime.deref_gc(&rhs);
-
-        Gc::new(Value::Bool(v1.equals(v2, runtime)), runtime)
-    }
-
-    pub fn eval_add(self, rhs: Self, runtime: &RT) -> Gc {
-        let v1: &Value = runtime.deref_gc(&self);
-        let v2: &Value = runtime.deref_gc(&rhs);
-
-        match (v1, v2) {
-            (Value::Number(n1), Value::Number(n2)) => Gc::new(Value::Number(n1 + n2), runtime),
-            _ => panic!("Mismatched types, expected numbers for add"),
-        }
-    }
-
-    pub fn eval_sub(self, rhs: Self, runtime: &RT) -> Gc {
-        let v1: &Value = runtime.deref_gc(&self);
-        let v2: &Value = runtime.deref_gc(&rhs);
-
-        match (v1, v2) {
-            (Value::Number(n1), Value::Number(n2)) => Gc::new(Value::Number(n1 - n2), runtime),
-            _ => panic!("Mismatched types, expected numbers for minus, got {v1:?}, {v2:?}"),
-        }
-    }
-
-    pub fn eval_mul(self, rhs: Self, runtime: &RT) -> Gc {
-        let v1: &Value = runtime.deref_gc(&self);
-        let v2: &Value = runtime.deref_gc(&rhs);
-
-        match (v1, v2) {
-            (Value::Number(n1), Value::Number(n2)) => Gc::new(Value::Number(n1 * n2), runtime),
-            _ => panic!("Mismatched types, expected numbers for mul"),
-        }
-    }
-
-    pub fn eval_div(self, rhs: Self, runtime: &RT) -> Gc {
-        let v1: &Value = runtime.deref_gc(&self);
-        let v2: &Value = runtime.deref_gc(&rhs);
-
-        match (v1, v2) {
-            (Value::Number(n1), Value::Number(n2)) => Gc::new(Value::Number(n1 / n2), runtime),
-            _ => panic!("Mismatched types, expected numbers for div"),
-        }
+    fn dump(&self) {
+        dbg!(&self.allocs);
     }
 }

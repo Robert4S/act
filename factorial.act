@@ -1,13 +1,13 @@
-Actor factorial {
-        State accumulator;
-	Initialiser {
+actor factorial {
+        state accumulator: Num;
+	initialiser {
             send(factorial, 8);
             return 1;
         }
 
-        Update (message) {
+        update (message: Num) {
             if (message <= 1) {
-                return "I am done with my work here";
+		return accumulator;
             };
             send(factorial, message - 1);
             return message * accumulator;
