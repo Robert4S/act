@@ -1,0 +1,41 @@
+actor fizzbuzz {
+	state u: Unit;
+	initialiser {
+		send(fizzbuzz, 10);
+	}
+
+	update (num: Int) {
+		send(print_num, num);
+		if (((num % 3) == 0) && ((num % 5) == 0)) {
+			send(print_str, "Fizzbuzz\n");
+		} else {
+			if ((num % 3) == 0) {
+				send(print_str, "Fizz\n");
+			} else {
+				if ((num % 5) == 0) {
+					send(print_str, "Buzz\n");
+				};
+			};
+		};
+
+		if (num >= 1) {
+			send(fizzbuzz, num - 1);
+		};
+	}
+}
+
+actor print_num {
+	state u: Unit;
+	initialiser {}
+	update (num: Int) {
+		intrinsic(print_int, num);
+	}
+}
+
+actor print_str {
+	state u: Unit;
+	initialiser {}
+	update (str: String) {
+		intrinsic(print_string, str);
+	}
+}

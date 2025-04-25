@@ -1,7 +1,36 @@
-use std::{f64::NAN, fmt::Debug};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    f64::NAN,
+    fmt::Debug,
+    rc::Rc,
+};
 
 use crate::tokenise::{InfixToken, Token, TokenKind};
-use im::Vector;
+
+use super::typecheck;
+
+macro_rules! consume {
+    ($tokens:ident, $p:pat) => {
+        match $tokens {
+            [(o, _), rest @ ..] if matches!(o, $p) => Some((o, rest)),
+            _ => None,
+        }
+    };
+    ($tokens:ident, $p:pat, $err:expr) => {
+        let ($p, $tokens) = (match $tokens {
+            [(o, _), rest @ ..] if matches!(o, $p) => (o, rest),
+            [(o, _), rest @ ..] => return make_error!($err, o.clone(), rest.to_vec().into()),
+            _ => return make_error!($err, TokenKind::EOF, Vec::new()),
+        }) else {
+            unreachable!();
+        };
+    };
+    ($orig:ident, $rebind:ident, $p:pat, $err:expr) => {
+        let $rebind = $orig;
+        consume!($rebind, $p, $err);
+    };
+}
 
 macro_rules! make_error {
     ($e:expr, $g:expr, $r:expr) => {
@@ -17,20 +46,21 @@ macro_rules! end_of_match {
     ($other:expr, $expected:expr) => {
         match $other {
             [(o, _), rest @ ..] => make_error!($expected, o.clone(), rest.to_vec().into()),
-            _ => make_error!($expected, TokenKind::EOF, Vector::new()),
+            _ => make_error!($expected, TokenKind::EOF, Vec::new()),
         }
     };
 }
 
+#[derive(Clone)]
 pub enum ParseError {
     WrongToken {
         expected: TokenKind,
         got: TokenKind,
-        remaining: Vector<Token>,
+        remaining: Vec<Token>,
     },
     NoRuleMatch {
         expected: String,
-        remaining: Vector<Token>,
+        remaining: Vec<Token>,
     },
 }
 
@@ -42,8 +72,7 @@ impl Debug for ParseError {
                 got,
                 remaining,
             } => {
-                let mut remaining = remaining.clone();
-                let line_num = remaining.pop_front().map(|(_, l)| l).unwrap_or(0);
+                let line_num = remaining.get(0).map(|(_, l)| l).unwrap_or(&0);
                 write!(
                     f,
                     "Line {line_num}: Expected TOKEN({expected:?}), got TOKEN({got:?})"
@@ -53,8 +82,7 @@ impl Debug for ParseError {
                 expected,
                 remaining,
             } => {
-                let mut remaining = remaining.clone();
-                let line_num = remaining.pop_front().map(|(_, l)| l).unwrap_or(0);
+                let line_num = remaining.get(0).map(|(_, l)| l).unwrap_or(&0);
                 write!(
                     f,
                     "Line {line_num}: Expected RULE({expected}), but could not match any patterns"
@@ -66,7 +94,12 @@ impl Debug for ParseError {
 
 type Result<T> = std::result::Result<T, ParseError>;
 
-pub type Cst = Vec<Actor>;
+#[derive(Clone, Debug)]
+pub struct Cst {
+    pub actors: Vec<Actor>,
+    pub aliases: HashMap<String, TypeExpr>,
+    pub declarations: HashSet<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct Actor {
@@ -81,7 +114,7 @@ pub struct Update {
     pub t_vars: Vec<String>,
     pub inp_name: String,
     pub inp_type: TypeExpr,
-    pub body: Vector<Statement>,
+    pub body: Vec<Statement>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,7 +125,7 @@ pub struct State {
 
 #[derive(Debug, Clone)]
 pub struct Initialiser {
-    pub body: Vector<Statement>,
+    pub body: Vec<Statement>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,8 +144,8 @@ pub enum Statement {
     },
     If {
         condition: Expr,
-        body: Vector<Statement>,
-        otherwise: Option<Vector<Statement>>,
+        body: Vec<Statement>,
+        otherwise: Option<Vec<Statement>>,
     },
 }
 
@@ -124,8 +157,72 @@ pub struct Assignment {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct Forall<T> {
-    pub vars: Vec<String>,
+pub struct Type;
+
+pub trait ForallT {
+    type Kind: Debug + Clone + Eq + PartialEq;
+
+    fn parse_typevar(tokens: &[Token]) -> Result<((String, Self::Kind), &[Token])>;
+}
+
+impl ForallT for TypeExpr {
+    type Kind = typecheck::Kind;
+    fn parse_typevar(tokens: &[Token]) -> Result<((String, Self::Kind), &[Token])> {
+        match tokens {
+            [(TokenKind::TypeVar(name), _), (TokenKind::Lsquare, _), rest @ ..] => {
+                let (arity, rest) = parse_hkt_typevar_tail(rest)?;
+                let kind = typecheck::Kind::Function {
+                    args: (0..arity).map(|_| typecheck::Kind::Type).collect(),
+                    output: Box::new(typecheck::Kind::Type),
+                };
+                Ok(((name.clone(), kind), rest))
+            }
+            [(TokenKind::TypeVar(name), _), rest @ ..] => {
+                Ok(((name.clone(), typecheck::Kind::Type), rest))
+            }
+            other => end_of_match!(other, TokenKind::TypeVar("_".to_string())),
+        }
+    }
+}
+
+fn parse_underscore(tokens: &[Token]) -> Result<&[Token]> {
+    match tokens {
+        [(TokenKind::Symbol(s), _), rest @ ..] if s.as_str() == "_" => Ok(rest),
+        other => end_of_match!(other, TokenKind::Symbol(String::from("_"))),
+    }
+}
+
+fn parse_hkt_typevar_tail(tokens: &[Token]) -> Result<(usize, &[Token])> {
+    let mut tokens = parse_underscore(tokens)?;
+    if let Some((_, rest)) = consume!(tokens, TokenKind::Rsquare) {
+        return Ok((1, rest));
+    }
+    let mut acc = 1;
+    while !matches!(tokens, [(TokenKind::Rsquare, _), ..]) {
+        consume!(tokens, rest, TokenKind::Comma, TokenKind::Comma);
+        tokens = parse_underscore(rest)?;
+        acc += 1;
+    }
+
+    consume!(tokens, TokenKind::Rsquare, TokenKind::Rsquare);
+
+    Ok((acc, tokens))
+}
+
+impl ForallT for Expr {
+    type Kind = Type;
+
+    fn parse_typevar(tokens: &[Token]) -> Result<((String, Self::Kind), &[Token])> {
+        match tokens {
+            [(TokenKind::TypeVar(name), _), rest @ ..] => Ok(((name.clone(), Type), rest)),
+            other => end_of_match!(other, TokenKind::TypeVar("_".to_string())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct Forall<T: ForallT> {
+    pub vars: Vec<(String, T::Kind)>,
     pub then: Box<T>,
 }
 
@@ -139,14 +236,16 @@ pub struct ForallElim<T> {
 pub enum TypeExpr {
     Base(String),
     Actor(Box<TypeExpr>),
+    Universal(Forall<TypeExpr>),
     Forall(Forall<TypeExpr>),
     ForallElim(ForallElim<TypeExpr>),
     TypeVar(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    Number(f64),
+    Float(f64),
+    Int(i64),
     String(String),
     Symbol(String),
     Bool(bool),
@@ -154,26 +253,22 @@ pub enum Expr {
         left: Box<Expr>,
         op: InfixToken,
         right: Box<Expr>,
+        eq_typename_buf: Rc<RefCell<String>>,
     },
     Forall(Forall<Expr>),
     ForallElim(ForallElim<Expr>),
 }
 
-fn parse_forall<T>(
+fn parse_forall<T: ForallT>(
     tokens: &[Token],
     parse_t: impl Fn(&[Token]) -> Result<(T, &[Token])>,
 ) -> Result<(Forall<T>, &[Token])> {
     let rest = match tokens {
-        [(TokenKind::Forall, _), rest @ ..] => Ok(rest),
-        other => end_of_match!(other, TokenKind::Forall),
-    }?;
-
-    let rest = match rest {
         [(TokenKind::Lsquare, _), rest @ ..] => Ok(rest),
         other => end_of_match!(other, TokenKind::Lsquare),
     }?;
 
-    let (vars, rest) = parse_forall_tail(rest)?;
+    let (vars, rest) = parse_forall_tail::<T>(rest)?;
     let (body, rest) = parse_t(rest)?;
     Ok((
         Forall::<T> {
@@ -184,35 +279,21 @@ fn parse_forall<T>(
     ))
 }
 
-fn parse_forall_tail(tokens: &[Token]) -> Result<(Vec<String>, &[Token])> {
-    let (first, tokens) = match parse_typevar(tokens) {
-        None => end_of_match!(tokens, TokenKind::TypeVar("_".to_string())),
-        Some((TypeExpr::TypeVar(first), tokens)) => Ok((first, tokens)),
-        _ => panic!(),
-    }?;
+fn parse_forall_tail<T: ForallT>(tokens: &[Token]) -> Result<(Vec<(String, T::Kind)>, &[Token])> {
+    let (first, tokens) = T::parse_typevar(tokens)?;
 
     let mut vars = vec![first];
     let mut tokens = tokens;
     while !matches!(tokens, [(TokenKind::Rsquare, _), ..]) {
-        let (_, rest) = parse_comma(tokens)?;
-        let (e, rest) = match parse_typevar(rest) {
-            None => end_of_match!(rest, TokenKind::TypeVar("_".to_string())),
-            Some((TypeExpr::TypeVar(first), tokens)) => Ok((first, tokens)),
-            _ => panic!(),
-        }?;
+        consume!(tokens, rest, TokenKind::Comma, TokenKind::Comma);
+        let (e, rest) = T::parse_typevar(rest)?;
 
         tokens = rest;
         vars.push(e);
     }
 
-    let tokens = match tokens {
-        [(TokenKind::Rsquare, _), rest @ ..] => rest,
-        other => return end_of_match!(other, TokenKind::Rsquare),
-    };
-
-    let [(TokenKind::Dot, _), tokens @ ..] = tokens else {
-        return end_of_match!(tokens, TokenKind::Dot);
-    };
+    consume!(tokens, TokenKind::Rsquare, TokenKind::Rsquare);
+    consume!(tokens, TokenKind::Dot, TokenKind::Dot);
 
     Ok((vars, tokens))
 }
@@ -222,29 +303,46 @@ fn parse_forall_elim(tokens: &[Token]) -> Result<(Vec<TypeExpr>, &[Token])> {
     let mut exprs = vec![e];
     let mut tokens = tokens;
     while !matches!(tokens, [(TokenKind::Rsquare, _), ..]) {
-        let (_, rest) = parse_comma(tokens)?;
+        consume!(tokens, rest, TokenKind::Comma, TokenKind::Comma);
         let (e, rest) = parse_type_expr(rest)?;
         tokens = rest;
         exprs.push(e);
     }
-    let tokens = parse_rsquare(tokens)?;
+
+    consume!(tokens, TokenKind::Rsquare, TokenKind::Rsquare);
 
     Ok((exprs, tokens))
 }
 
-pub fn parse(tokens: &[Token]) -> Result<Cst> {
+pub fn parse(tokens: &[Token], cst: &mut Cst) -> Result<()> {
     let mut tokens = tokens;
-    let mut actors = Vec::new();
+
     while !matches!(tokens, [(TokenKind::EOF, _)]) {
-        let (actor, rest) = parse_actor(tokens)?;
-        let actor = match actor {
-            Statement::Actor(a) => a,
-            o => panic!("nonono {o:?} is not an actor"),
-        };
-        actors.push(actor);
-        tokens = rest;
+        match tokens {
+            [(TokenKind::Type, _), (TokenKind::TypeName(name), _), (TokenKind::Assign, _), rest @ ..] =>
+            {
+                let (t, rest) = parse_type_expr(rest)?;
+                cst.aliases.insert(name.clone(), t);
+                consume!(rest, TokenKind::Semi, TokenKind::Semi);
+                tokens = rest;
+            }
+            [(TokenKind::NewType, _), (TokenKind::TypeName(name), _), rest @ ..] => {
+                cst.declarations.insert(name.clone());
+                consume!(rest, TokenKind::Semi, TokenKind::Semi);
+                tokens = rest
+            }
+            other => {
+                let (actor, rest) = parse_actor(other)?;
+                let actor = match actor {
+                    Statement::Actor(a) => a,
+                    o => panic!("nonono {o:?} is not an actor"),
+                };
+                cst.actors.push(actor);
+                tokens = rest;
+            }
+        }
     }
-    Ok(actors.into())
+    Ok(())
 }
 
 fn parse_type_expr(tokens: &[Token]) -> Result<(TypeExpr, &[Token])> {
@@ -254,25 +352,35 @@ fn parse_type_expr(tokens: &[Token]) -> Result<(TypeExpr, &[Token])> {
     }
 
     let (parsed, rest) = match tokens {
-        [(TokenKind::Lparen, _), rest @ ..] => match parse_type_expr(rest)? {
-            (inner, [(TokenKind::Rparen, _), rest @ ..]) => Ok((inner, rest)),
-            (_, other) => end_of_match!(other, TokenKind::Rparen),
-        },
-        tokens => vec![parse_base_type, parse_forall_type, parse_typevar]
-            .iter()
-            .filter_map(|f| f(tokens))
-            .next()
-            .ok_or(ParseError::NoRuleMatch {
-                expected: "Type expression".to_string(),
-                remaining: tokens.iter().cloned().collect(),
-            }),
+        [(TokenKind::Lparen, _), rest @ ..] => {
+            let (inner, rest) = parse_type_expr(rest)?;
+            consume!(rest, TokenKind::Rparen, TokenKind::Rparen);
+            Ok((inner, rest))
+        }
+        tokens => [
+            parse_base_type,
+            parse_forall_type,
+            parse_typevar,
+            parse_universal,
+        ]
+        .iter()
+        .filter_map(|f| f(tokens))
+        .next()
+        .ok_or(ParseError::NoRuleMatch {
+            expected: "Type expression".to_string(),
+            remaining: tokens.iter().cloned().collect(),
+        }),
     }?;
 
+    parse_type_expr_tail(parsed, rest)
+}
+
+fn parse_type_expr_tail(parsed: TypeExpr, rest: &[Token]) -> Result<(TypeExpr, &[Token])> {
     match (rest, parsed) {
         ([(TokenKind::Lsquare, _), rest @ ..], TypeExpr::Base(s)) if s.as_str() == "Pid" => {
             let (arg, rest) = parse_type_expr(rest)?;
-            let rest = parse_rsquare(rest)?;
-            Ok((TypeExpr::Actor(Box::new(arg)), rest))
+            consume!(rest, TokenKind::Rsquare, TokenKind::Rsquare);
+            parse_type_expr_tail(TypeExpr::Actor(Box::new(arg)), rest)
         }
         ([(TokenKind::Lsquare, _), rest @ ..], parsed) => {
             let (args, tokens) = parse_forall_elim(rest)?;
@@ -281,10 +389,22 @@ fn parse_type_expr(tokens: &[Token]) -> Result<(TypeExpr, &[Token])> {
                 args,
             });
 
-            Ok((elim, tokens))
+            parse_type_expr_tail(elim, tokens)
         }
         (rest, parsed) => Ok((parsed, rest)),
     }
+}
+
+fn parse_universal(tokens: &[Token]) -> Option<(TypeExpr, &[Token])> {
+    let rest = match tokens {
+        [(TokenKind::Forall, _), rest @ ..] => Ok(rest),
+        other => end_of_match!(other, TokenKind::Forall),
+    }
+    .ok()?;
+
+    let (body, rest) = parse_forall(rest, parse_type_expr).ok()?;
+
+    Some((TypeExpr::Universal(body), rest))
 }
 
 fn parse_base_type(tokens: &[Token]) -> Option<(TypeExpr, &[Token])> {
@@ -303,33 +423,26 @@ fn parse_typevar(tokens: &[Token]) -> Option<(TypeExpr, &[Token])> {
 }
 
 fn parse_symbol(tokens: &[Token]) -> Result<(String, &[Token])> {
-    match tokens {
-        [(TokenKind::Symbol(s), _), rest @ ..] => Ok((s.clone(), rest)),
-        other => end_of_match!(other, TokenKind::Symbol("".to_string())),
-    }
+    consume!(
+        tokens,
+        TokenKind::Symbol(s),
+        TokenKind::Symbol("".to_string())
+    );
+
+    Ok((s.clone(), tokens))
 }
 
 fn parse_actor(tokens: &[Token]) -> Result<(Statement, &[Token])> {
-    let mut kind: Option<Box<dyn Fn(Actor) -> Statement>> = None;
-    let tokens = match tokens {
-        [(TokenKind::Actor, _), rest @ ..] => {
-            kind = Some(Box::new(|a| Statement::Actor(a)));
-            Ok(rest)
-        }
-        [(TokenKind::Daemon, _), rest @ ..] => {
-            kind = Some(Box::new(|a| Statement::Daemon(a)));
-            Ok(rest)
-        }
-        other => end_of_match!(other, TokenKind::Actor),
-    }?;
+    consume!(tokens, TokenKind::Actor, TokenKind::Actor);
+
     let (name, tokens) = parse_symbol(tokens)?;
-    let (_, tokens) = parse_lbrac(tokens)?;
+    consume!(tokens, TokenKind::Lbrac, TokenKind::Lbrac);
     let (state, tokens) = parse_state(tokens)?;
     let (initialiser, tokens) = parse_initialiser(tokens)?;
     let (update, tokens) = parse_updater(tokens)?;
-    let (_, tokens) = parse_rbrac(tokens)?;
+    consume!(tokens, TokenKind::Rbrac, TokenKind::Rbrac);
     Ok((
-        kind.unwrap()(Actor {
+        Statement::Actor(Actor {
             name,
             state,
             update,
@@ -339,83 +452,50 @@ fn parse_actor(tokens: &[Token]) -> Result<(Statement, &[Token])> {
     ))
 }
 
-fn parse_lbrac(tokens: &[Token]) -> Result<((), &[Token])> {
-    match tokens {
-        [(TokenKind::Lbrac, _), rest @ ..] => Ok(((), rest)),
-        other => end_of_match!(other, TokenKind::Lbrac),
-    }
-}
-
-fn parse_rbrac(tokens: &[Token]) -> Result<((), &[Token])> {
-    match tokens {
-        [(TokenKind::Rbrac, _), rest @ ..] => Ok(((), rest)),
-        other => end_of_match!(other, TokenKind::Rbrac),
-    }
-}
-
-fn parse_lparen(tokens: &[Token]) -> Result<((), &[Token])> {
-    match tokens {
-        [(TokenKind::Lparen, _), rest @ ..] => Ok(((), rest)),
-        other => end_of_match!(other, TokenKind::Lparen),
-    }
-}
-
-fn parse_rparen(tokens: &[Token]) -> Result<((), &[Token])> {
-    match tokens {
-        [(TokenKind::Rparen, _), rest @ ..] => Ok(((), rest)),
-        other => end_of_match!(other, TokenKind::Rparen),
-    }
-}
-
 fn parse_state(tokens: &[Token]) -> Result<(State, &[Token])> {
-    match tokens {
-        [(TokenKind::State, _), rest @ ..] => {
-            let (name, rest) = parse_symbol(rest)?;
-            let rest = parse_colon(rest)?;
-            let (type_, rest) = parse_type_expr(rest)?;
-            let rest = parse_semi(rest)?;
-            Ok((State { type_, name }, rest))
-        }
-        other => end_of_match!(other, TokenKind::State),
-    }
+    consume!(tokens, TokenKind::State, TokenKind::State);
+    consume!(
+        tokens,
+        TokenKind::Symbol(name),
+        TokenKind::Symbol("".to_string())
+    );
+    consume!(tokens, TokenKind::Colon, TokenKind::Colon);
+    let (type_, tokens) = parse_type_expr(tokens)?;
+    consume!(tokens, TokenKind::Semi, TokenKind::Semi);
+    Ok((
+        State {
+            type_,
+            name: name.clone(),
+        },
+        tokens,
+    ))
 }
 
 fn parse_initialiser(tokens: &[Token]) -> Result<(Initialiser, &[Token])> {
-    match tokens {
-        [(TokenKind::Initialiser, _), rest @ ..] => {
-            let (statements, rest) = parse_statement_block(rest)?;
-            let initialiser = Initialiser { body: statements };
-            Ok((initialiser, rest))
-        }
-        other => end_of_match!(other, TokenKind::Initialiser),
-    }
+    consume!(tokens, TokenKind::Initialiser, TokenKind::Initialiser);
+    let (statements, tokens) = parse_statement_block(tokens)?;
+    let initialiser = Initialiser { body: statements };
+    Ok((initialiser, tokens))
 }
 
-fn parse_semi(tokens: &[Token]) -> Result<&[Token]> {
-    match tokens {
-        [(TokenKind::Semi, _), rest @ ..] => Ok(rest),
-        other => end_of_match!(other, TokenKind::Semi),
-    }
-}
-
-fn parse_statement_block(tokens: &[Token]) -> Result<(Vector<Statement>, &[Token])> {
-    let (_, tokens) = parse_lbrac(tokens)?;
+fn parse_statement_block(tokens: &[Token]) -> Result<(Vec<Statement>, &[Token])> {
+    consume!(tokens, TokenKind::Lbrac, TokenKind::Lbrac);
     let mut statements = Vec::new();
     let mut tokens = tokens;
     while !matches!(tokens, [(TokenKind::Rbrac, _), ..]) {
         let (statement, rest) = parse_statement(tokens)?;
-        let rest = parse_semi(rest)?;
+        consume!(rest, TokenKind::Semi, TokenKind::Semi);
         statements.push(statement);
         tokens = rest;
     }
-    let (_, tokens) = parse_rbrac(tokens)?;
+    consume!(tokens, TokenKind::Rbrac, TokenKind::Rbrac);
 
     let statements = statements.into_iter().collect();
     Ok((statements, tokens))
 }
 
 fn parse_statement(tokens: &[Token]) -> Result<(Statement, &[Token])> {
-    let fns = vec![
+    let fns = [
         parse_assignment,
         parse_actor,
         parse_return,
@@ -424,17 +504,56 @@ fn parse_statement(tokens: &[Token]) -> Result<(Statement, &[Token])> {
         parse_intrinsic,
     ];
 
-    fns.iter()
-        .filter_map(|f| f(tokens).ok())
-        .next()
-        .ok_or(ParseError::NoRuleMatch {
-            expected: "Statement".to_string(),
-            remaining: tokens.into(),
-        })
+    let res = fns.iter().filter_map(|f| f(tokens).ok()).next();
+
+    if let Some(r) = res {
+        Ok(r)
+    } else {
+        let errors = fns.iter().filter_map(|f| match f(tokens) {
+            Err(e) => Some(e),
+            _ => None,
+        });
+        let [(_, mut highest_line), ..] = tokens else {
+            panic!()
+        };
+        let mut highest_error = None;
+        for error in errors {
+            match &error {
+                ParseError::WrongToken {
+                    expected: _,
+                    got: _,
+                    remaining,
+                } if current_line(remaining) > highest_line => {
+                    highest_error = Some(error.clone());
+                    highest_line = current_line(remaining);
+                }
+                ParseError::NoRuleMatch {
+                    expected: _,
+                    remaining,
+                } if current_line(remaining) > highest_line => {
+                    highest_error = Some(error.clone());
+                    highest_line = current_line(remaining);
+                }
+                _ => (),
+            }
+        }
+        if let Some(e) = highest_error {
+            Err(e)
+        } else {
+            Err(ParseError::NoRuleMatch {
+                expected: "Statement".to_string(),
+                remaining: tokens.iter().cloned().collect(),
+            })
+        }
+    }
+}
+
+fn current_line(tokens: &Vec<Token>) -> usize {
+    tokens[0].1
 }
 
 fn parse_if(tokens: &[Token]) -> Result<(Statement, &[Token])> {
-    let (_, tokens) = parse_if_literal(tokens)?;
+    consume!(tokens, TokenKind::If, TokenKind::If);
     let (condition, tokens) = parse_expr(tokens)?;
     let (body, tokens) = parse_statement_block(tokens)?;
     let (otherwise, tokens) = parse_else(tokens)?;
@@ -448,7 +567,7 @@ fn parse_if(tokens: &[Token]) -> Result<(Statement, &[Token])> {
     ))
 }
 
-fn parse_else(tokens: &[Token]) -> Result<(Option<Vector<Statement>>, &[Token])> {
+fn parse_else(tokens: &[Token]) -> Result<(Option<Vec<Statement>>, &[Token])> {
     match tokens {
         [(TokenKind::Else, _), rest @ ..] => {
             let (statements, tokens) = parse_statement_block(rest)?;
@@ -458,18 +577,11 @@ fn parse_else(tokens: &[Token]) -> Result<(Option<Vector<Statement>>, &[Token])>
     }
 }
 
-fn parse_if_literal(tokens: &[Token]) -> Result<((), &[Token])> {
-    match tokens {
-        [(TokenKind::If, _), rest @ ..] => Ok(((), rest)),
-        other => end_of_match!(other, TokenKind::If),
-    }
-}
-
 fn parse_intrinsic(tokens: &[Token]) -> Result<(Statement, &[Token])> {
-    let tokens = parse_intrinsic_literal(tokens)?;
-    let (_, tokens) = parse_lparen(tokens)?;
+    consume!(tokens, TokenKind::Intrinsic, TokenKind::Intrinsic);
+    consume!(tokens, TokenKind::Lparen, TokenKind::Lparen);
     let (func_name, tokens) = parse_symbol(tokens)?;
-    let (_, tokens) = parse_comma(tokens)?;
+    consume!(tokens, TokenKind::Comma, TokenKind::Comma);
     let (args, tokens) = parse_intrinsic_tail(tokens)?;
 
     Ok((Statement::Intrinsic { func_name, args }, tokens))
@@ -480,56 +592,40 @@ fn parse_intrinsic_tail(tokens: &[Token]) -> Result<(Vec<Expr>, &[Token])> {
     let mut exprs = vec![e];
     let mut tokens = tokens;
     while !matches!(tokens, [(TokenKind::Rparen, _), ..]) {
-        let (_, rest) = parse_comma(tokens)?;
+        consume!(tokens, rest, TokenKind::Comma, TokenKind::Comma);
         let (e, rest) = parse_expr(rest)?;
         tokens = rest;
         exprs.push(e);
     }
-    let (_, tokens) = parse_rparen(tokens)?;
+    consume!(tokens, TokenKind::Rparen, TokenKind::Rparen);
 
     Ok((exprs, tokens))
 }
 
-fn parse_intrinsic_literal(tokens: &[Token]) -> Result<&[Token]> {
-    match tokens {
-        [(TokenKind::Intrinsic, _), rest @ ..] => Ok(rest),
-        other => end_of_match!(other, TokenKind::Intrinsic),
-    }
-}
-
-fn parse_colon(tokens: &[Token]) -> Result<&[Token]> {
-    match tokens {
-        [(TokenKind::Colon, _), rest @ ..] => Ok(rest),
-        other => end_of_match!(other, TokenKind::Colon),
-    }
-}
-
 fn parse_assignment(tokens: &[Token]) -> Result<(Statement, &[Token])> {
     let (name, tokens) = parse_symbol(tokens)?;
-    let tokens = parse_colon(tokens)?;
+    consume!(tokens, TokenKind::Colon, TokenKind::Colon);
     let (type_, tokens) = parse_type_expr(tokens)?;
-    match tokens {
-        [(TokenKind::Infix(InfixToken::Assign), _), tokens @ ..] => {
-            let (expr, tokens) = parse_expr(tokens)?;
-            Ok((
-                Statement::Assignment(Assignment {
-                    type_,
-                    left: name.clone(),
-                    right: expr,
-                }),
-                tokens,
-            ))
-        }
-        other => end_of_match!(other, TokenKind::Infix(InfixToken::Assign)),
-    }
+    consume!(tokens, TokenKind::Assign, TokenKind::Assign);
+    let (expr, tokens) = parse_expr(tokens)?;
+    Ok((
+        Statement::Assignment(Assignment {
+            type_,
+            left: name.clone(),
+            right: expr,
+        }),
+        tokens,
+    ))
 }
 
 fn parse_expr(tokens: &[Token]) -> Result<(Expr, &[Token])> {
     fn parse_symbol(tokens: &[Token]) -> Result<(Expr, &[Token])> {
-        match tokens {
-            [(TokenKind::Symbol(name), _), rest @ ..] => Ok((Expr::Symbol(name.clone()), rest)),
-            other => end_of_match!(other, TokenKind::Symbol("".to_string())),
-        }
+        consume!(
+            tokens,
+            TokenKind::Symbol(name),
+            TokenKind::Symbol("".to_string())
+        );
+        Ok((Expr::Symbol(name.clone()), tokens))
     }
 
     fn parse_forall_expr(tokens: &[Token]) -> Result<(Expr, &[Token])> {
@@ -538,11 +634,12 @@ fn parse_expr(tokens: &[Token]) -> Result<(Expr, &[Token])> {
     }
 
     let (expr, rest) = match tokens {
-        [(TokenKind::Lparen, _), rest @ ..] => match parse_expr(rest)? {
-            (inner, [(TokenKind::Rparen, _), rest @ ..]) => Ok((inner, rest)),
-            (_, other) => end_of_match!(other, TokenKind::Rparen),
-        },
-        _ => vec![
+        [(TokenKind::Lparen, _), rest @ ..] => {
+            let (inner, rest) = parse_expr(rest)?;
+            consume!(rest, TokenKind::Rparen, TokenKind::Rparen);
+            Ok((inner, rest))
+        }
+        _ => [
             parse_number,
             parse_bool,
             parse_symbol,
@@ -558,6 +655,10 @@ fn parse_expr(tokens: &[Token]) -> Result<(Expr, &[Token])> {
         }),
     }?;
 
+    parse_expr_tail(expr, rest)
+}
+
+fn parse_expr_tail(expr: Expr, rest: &[Token]) -> Result<(Expr, &[Token])> {
     let (e, rest) = if let [(TokenKind::Infix(i), _), rest @ ..] = rest {
         let (right, rest) = parse_expr(rest)?;
         (
@@ -565,6 +666,7 @@ fn parse_expr(tokens: &[Token]) -> Result<(Expr, &[Token])> {
                 left: Box::new(expr),
                 op: i.clone(),
                 right: Box::new(right),
+                eq_typename_buf: Rc::default(),
             },
             rest,
         )
@@ -572,25 +674,20 @@ fn parse_expr(tokens: &[Token]) -> Result<(Expr, &[Token])> {
         (expr, rest)
     };
 
-    if let [(TokenKind::Lsquare, _), rest @ ..] = rest {
+    let (e, rest) = if let [(TokenKind::Lsquare, _), rest @ ..] = rest {
         let (args, rest) = parse_forall_elim(rest)?;
-        Ok((
+        (
             Expr::ForallElim(ForallElim {
                 expr: Box::new(e),
                 args,
             }),
             rest,
-        ))
+        )
     } else {
-        Ok((e, rest))
-    }
-}
+        return Ok((e, rest));
+    };
 
-fn parse_rsquare(tokens: &[Token]) -> Result<&[Token]> {
-    match tokens {
-        [(TokenKind::Rsquare, _), rest @ ..] => Ok(rest),
-        other => end_of_match!(other, TokenKind::Rsquare),
-    }
+    parse_expr_tail(e, rest)
 }
 
 fn parse_string(tokens: &[Token]) -> Result<(Expr, &[Token])> {
@@ -602,8 +699,9 @@ fn parse_string(tokens: &[Token]) -> Result<(Expr, &[Token])> {
 
 fn parse_number(tokens: &[Token]) -> Result<(Expr, &[Token])> {
     match tokens {
-        [(TokenKind::Number(n), _), rest @ ..] => Ok((Expr::Number(*n), rest)),
-        other => end_of_match!(other, TokenKind::Number(NAN)),
+        [(TokenKind::Float(n), _), rest @ ..] => Ok((Expr::Float(*n), rest)),
+        [(TokenKind::Int(n), _), rest @ ..] => Ok((Expr::Int(*n), rest)),
+        other => end_of_match!(other, TokenKind::Float(NAN)),
     }
 }
 fn parse_bool(tokens: &[Token]) -> Result<(Expr, &[Token])> {
@@ -625,30 +723,20 @@ fn parse_return(tokens: &[Token]) -> Result<(Statement, &[Token])> {
 }
 
 fn parse_send(tokens: &[Token]) -> Result<(Statement, &[Token])> {
-    match tokens {
-        [(TokenKind::Send, _), tokens @ ..] => {
-            let (_, tokens) = parse_lparen(tokens)?;
-            let (left, tokens) = parse_expr(tokens)?;
-            let (_, tokens) = parse_comma(tokens)?;
-            let (right, tokens) = parse_expr(tokens)?;
-            let (_, tokens) = parse_rparen(tokens)?;
-            Ok((
-                Statement::Send {
-                    destination: left,
-                    value: right,
-                },
-                tokens,
-            ))
-        }
-        other => end_of_match!(other, TokenKind::Send),
-    }
-}
+    consume!(tokens, TokenKind::Send, TokenKind::Send);
+    consume!(tokens, TokenKind::Lparen, TokenKind::Lparen);
+    let (left, tokens) = parse_expr(tokens)?;
+    consume!(tokens, TokenKind::Comma, TokenKind::Comma);
 
-fn parse_comma(tokens: &[Token]) -> Result<((), &[Token])> {
-    match tokens {
-        [(TokenKind::Comma, _), rest @ ..] => Ok(((), rest)),
-        other => end_of_match!(other, TokenKind::Comma),
-    }
+    let (right, tokens) = parse_expr(tokens)?;
+    consume!(tokens, TokenKind::Rparen, TokenKind::Rparen);
+    Ok((
+        Statement::Send {
+            destination: left,
+            value: right,
+        },
+        tokens,
+    ))
 }
 
 fn parse_update_intro(tokens: &[Token]) -> Result<(Vec<String>, &[Token])> {
@@ -667,26 +755,28 @@ fn parse_gen_vars(tokens: &[Token]) -> Result<(Vec<String>, &[Token])> {
     let mut exprs = vec![e];
     let mut tokens = tokens;
     while !matches!(tokens, [(TokenKind::Rsquare, _), ..]) {
-        let (_, rest) = parse_comma(tokens)?;
-        let (e, rest) = match rest {
-            [(TokenKind::TypeVar(s), _), rest @ ..] => Ok((s.clone(), rest)),
-            other => end_of_match!(other, TokenKind::TypeVar("_".to_string())),
-        }?;
+        let rest = tokens;
+        consume!(rest, TokenKind::Comma, TokenKind::Comma);
+        consume!(
+            rest,
+            TokenKind::TypeVar(e),
+            TokenKind::TypeVar("_".to_string())
+        );
         tokens = rest;
-        exprs.push(e);
+        exprs.push(e.clone());
     }
-    let tokens = parse_rsquare(tokens)?;
+    consume!(tokens, TokenKind::Rsquare, TokenKind::Rsquare);
 
     Ok((exprs, tokens))
 }
 
 fn parse_updater(tokens: &[Token]) -> Result<(Update, &[Token])> {
     let (t_vars, tokens) = parse_update_intro(tokens)?;
-    let (_, tokens) = parse_lparen(tokens)?;
+    consume!(tokens, TokenKind::Lparen, TokenKind::Lparen);
     let (arg, tokens) = parse_symbol(tokens)?;
-    let tokens = parse_colon(tokens)?;
+    consume!(tokens, TokenKind::Colon, TokenKind::Colon);
     let (inp_type, tokens) = parse_type_expr(tokens)?;
-    let (_, tokens) = parse_rparen(tokens)?;
+    consume!(tokens, TokenKind::Rparen, TokenKind::Rparen);
     let (statements, tokens) = parse_statement_block(tokens)?;
     Ok((
         Update {

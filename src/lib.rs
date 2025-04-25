@@ -15,10 +15,16 @@ pub fn add(left: u64, right: u64) -> u64 {
 mod runtimelib;
 
 use runtimelib::{
-    gc::{self, HeaderTag},
+    gc::{self, mask_integer, unmask_integer, HeaderTag},
     runtime::{self, Pid},
 };
 static RT: LazyLock<Arc<RT>> = LazyLock::new(|| Arc::new(RT::new()));
+
+#[no_mangle]
+pub extern "C" fn eq_val(rt: &RT, v1: Gc, v2: Gc) -> Gc {
+    let b = unsafe { v1.is_eq(v2) };
+    make_gc_bool(rt, b)
+}
 
 #[no_mangle]
 pub extern "C" fn make_actor(
@@ -53,13 +59,24 @@ pub extern "C" fn make_actor_global(
 }
 
 #[no_mangle]
-pub extern "C" fn make_gc_number(rt: &RT) -> Gc {
+pub extern "C" fn make_gc_int(rt: &RT, n: i64) -> Gc {
+    let res = gc::mask_integer(n);
+    res
+}
+
+#[no_mangle]
+pub extern "C" fn unmask_int(rt: &RT, n: Gc) -> i64 {
+    gc::unmask_integer(n)
+}
+
+#[no_mangle]
+pub extern "C" fn make_gc_float(rt: &RT) -> Gc {
     rt.make_gc(HeaderTag::Raw, 8)
 }
 
 #[no_mangle]
-pub extern "C" fn make_gc_bool(rt: &RT) -> Gc {
-    rt.make_gc(HeaderTag::Raw, 1)
+pub extern "C" fn make_gc_bool(rt: &RT, b: bool) -> Gc {
+    mask_integer(b as i64)
 }
 
 #[repr(C)]
@@ -105,12 +122,7 @@ pub unsafe extern "C" fn make_gc_string(rt: &RT, string: *const i8) -> Gc {
     let length = s.len();
     let data = rt.make_gc(HeaderTag::Raw, length as u32);
     let length_ptr = rt.make_gc(HeaderTag::Raw, 8);
-    length_ptr.ptr::<usize>().write(length);
-    let strdata = ActString {
-        length: length_ptr,
-        data,
-    };
-    write_str_to_buffer(data.ptr::<u8>(), s);
+    let strdata = ActString::from_str(data, length_ptr, s);
     let str_ptr = rt.make_gc(HeaderTag::TraceBlock, 16);
     str_ptr.ptr::<ActString>().write(strdata);
     str_ptr
@@ -118,32 +130,30 @@ pub unsafe extern "C" fn make_gc_string(rt: &RT, string: *const i8) -> Gc {
 
 #[no_mangle]
 pub extern "C" fn eval_eq_bool(runtime: &RT, lhs: Gc, rhs: Gc) -> Gc {
-    let b = unsafe { lhs.ptr::<u8>().read() == rhs.ptr::<u8>().read() };
-    let ptr = make_gc_bool(runtime);
-    unsafe {
-        ptr.ptr::<u8>().write(b as u8);
-    }
+    eval_eq_int(runtime, lhs, rhs)
+}
+
+#[no_mangle]
+pub extern "C" fn eval_eq_float(runtime: &RT, lhs: Gc, rhs: Gc) -> Gc {
+    let b = unsafe { lhs.ptr::<f64>().read() == rhs.ptr::<f64>().read() };
+    let ptr = make_gc_bool(runtime, b);
+
     ptr
 }
 
 #[no_mangle]
-pub extern "C" fn eval_eq_num(runtime: &RT, lhs: Gc, rhs: Gc) -> Gc {
-    let b = unsafe { lhs.ptr::<f64>().read() == rhs.ptr::<f64>().read() };
-    let ptr = make_gc_bool(runtime);
-    unsafe {
-        ptr.ptr::<u8>().write(b as u8);
-    }
+pub extern "C" fn eval_eq_int(runtime: &RT, lhs: Gc, rhs: Gc) -> Gc {
+    let b = unmask_integer(lhs) == unmask_integer(rhs);
+    let ptr = make_gc_bool(runtime, b);
     ptr
 }
 
 #[no_mangle]
 pub extern "C" fn eval_eq_string(runtime: &RT, lhs: Gc, rhs: Gc) -> Gc {
-    todo!();
-    let b = unsafe { lhs.ptr::<f64>().read() == rhs.ptr::<f64>().read() };
-    let ptr = make_gc_bool(runtime);
-    unsafe {
-        ptr.ptr::<u8>().write(b as u8);
-    }
+    let b = unsafe { lhs.ptr::<ActString>().read().to_str() }
+        == unsafe { rhs.ptr::<ActString>().read().to_str() };
+    let ptr = make_gc_bool(runtime, b);
+
     ptr
 }
 
@@ -169,9 +179,21 @@ pub unsafe extern "C" fn print_newline(_rt: &RT) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn print_number(_rt: &RT, number: Gc) {
+pub unsafe extern "C" fn print_int(_rt: &RT, number: Gc) {
+    let num = unmask_integer(number);
+    println!("{num}");
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn print_float(_rt: &RT, number: Gc) {
     let num = number.ptr::<f64>().read();
-    print!("{num}");
+    println!("{num}");
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn eval_int_div(rt: &RT, left: i64, right: i64) -> Gc {
+    let res = left / right;
+    mask_integer(res)
 }
 
 #[no_mangle]

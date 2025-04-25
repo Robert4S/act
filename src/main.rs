@@ -1,11 +1,17 @@
 use clap::Parser;
 use cranegen::Compiler;
-use std::{env, fs, path::PathBuf, process::Command, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    env, fs,
+    path::PathBuf,
+    process::Command,
+    str::FromStr,
+};
 mod compiler;
 use compiler::{
     cranegen,
     frontend::{
-        cst::{self, Forall, TypeExpr},
+        cst::{self},
         tokenise,
         typecheck::TypeChecker,
     },
@@ -55,21 +61,25 @@ fn compile() -> Result<(), String> {
         .collect();
 
     let tokenised = tokenize_all(input.as_slice()).ok_or("Error tokenising")?;
-    let tree = cst::parse(&tokenised).map_err(|e| format!("Error parsing: {e:?}"))?;
-    let tc = TypeChecker::validate_prog(
-        tree.clone(),
-        vec![(
-            "Product".to_string(),
-            Forall {
-                vars: vec!["a".to_string(), "b".to_string()],
-                then: Box::new(TypeExpr::Base("Unit".to_string())),
-            },
-        )],
-        vec![],
-    )
-    .map_err(|e| format!("Error during validation: {e}"))?;
+    let mut tree = Cst {
+        actors: Vec::new(),
+        aliases: HashMap::new(),
+        declarations: HashSet::new(),
+    };
+    cst::parse(&tokenised, &mut tree)
+        .map_err(|e| format!("Error parsing: {e:?}, cst was: \n {tree:?}"))?;
 
-    gen_cranelift(tree, args.debug, &format!("{stem}.o"), tc)?;
+    ["Unit", "Bool", "Int", "Float", "String"]
+        .into_iter()
+        .map(str::to_string)
+        .for_each(|name| {
+            tree.declarations.insert(name);
+        });
+
+    let _ = TypeChecker::validate_prog(tree.clone())
+        .map_err(|e| format!("Error during validation: {e}"))?;
+
+    gen_cranelift(tree, args.debug, &format!("{stem}.o"))?;
 
     let home = env::var("HOME").unwrap();
 
@@ -90,9 +100,8 @@ fn compile() -> Result<(), String> {
     fs::rename(format!("{stem}"), format!("./act_bin/{stem}")).map_err(|e| e.to_string())
 }
 
-fn gen_cranelift(instrs: Cst, debug: bool, name: &str, tc: TypeChecker) -> Result<(), String> {
+fn gen_cranelift(instrs: Cst, debug: bool, name: &str) -> Result<(), String> {
     let mut compiler = Compiler::default();
-    compiler.typechecker = tc;
 
     compiler.debug = debug;
 

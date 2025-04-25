@@ -1,7 +1,9 @@
 prog ::= <declarations>
 declarations ::= <list(<actor>)>
 actor ::= "actor" <symbol> { <state> <initialiser> <message-handler> }
-expr ::= <number> | <string> | <symbol> | <bool> | ( <expr> ) | <expr> <infix> <expr>
+expr ::= <expr-head> <expr-tail>
+expr-head ::= <number> | <string> | <symbol> | <bool> | ( <expr> )
+expr-tail ::= <infix> <expr> | ε
 string ::= '"' [^"]* '"''
 number ::= [-]?[0-9]*[.]?[0-9]*
 infix ::= '+' | '*' | '-' | '/' | '^' | "==" | "<=" | ">=" | '<' | '>' | "&&" | "||"
@@ -19,9 +21,10 @@ return ::= "return" <expr>
 send ::= "send(" <expr> ',' <expr> ")"
 if-statement ::= "if" <expr> '{' <list(<statement>)> '}' <if-tail>
 if-tail ::= "else" '{' <list(<statement>)> '}' | ε
-type-expr ::= <base> | <forall> | <constructor> | <typevar> | <actor-type>
-base ::= [A-Z][a-zA-Z]+
-forall ::= "forall(" <list(<typevar> ',')> ')' '.' <type-expr>
+type-expr ::= <type-expr-head> <type-expr-tail>
+type-expr-head ::= <typename> | <forall> | <typevar> 	
+# The pid rule is later "parsed" in something more like a filter pass than actual parsing. it is initially parsed as a type-expr(type-expr-head(typename)) type-expr-tail(arg))
+type-expr-tail ::= '[' <list(<type-expr> ',')> ']' <type-expr-tail> | ε
+typename ::= [A-Z][a-zA-Z]+
+forall ::= "for" '[' <list(<typevar> ',')> ']' '.' <type-expr>
 typevar ::= '\'' [a-z]+
-actor-type ::= "Pid(" <type-expr> ')'
-constructor ::= <base> '(' <list(<type-expr> ',')> ')'

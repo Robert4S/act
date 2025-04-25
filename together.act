@@ -1,9 +1,11 @@
+type NumPid = ['a]. Pid['a];
+
 actor sum {
 	state acc: Num;
 
 	initialiser {
 		anything: for ['a]. Pid['a] = println;
-		send(get_called, for ['a]. anything['a]);
+		send(get_called['a], ['a]. anything['a]);
 
 		send(call_me, sum);
 		return 0;
@@ -31,9 +33,8 @@ actor println {
 actor get_called {
 	state u: Unit;
 	initialiser {}
-	update (who: for ['a]. Pid['a]) {
-		x: (for ['a]. 'a)[Num] = 10;
-		send(who[Num], 10000);
+	update['a] (who: for ['a]. Pid['a]) {
+		x: Unit = who[Num][String][Unit];
 	}
 }
 

@@ -1,17 +1,28 @@
+type Hkt = ['a[_], 'b]. 'a['b];
+
+type SomePid = ['a]. Pid['a];
+
+type Numpid = Hkt[SomePid, Int];
+type N = Numpid;
+type U = Numpid;
+
+type SomeNum = Int;
+
 actor summing {
-	state sum: Num;
+	state sum: SomeNum;
 
 	initialiser {
-		send(summing, 10000);
+		myself: Numpid = summing;
+		send(myself, 10000);
 		return 0;
 	}
 
-	update (num: Num) {
+	update (num: SomeNum) {
 		if (num <= 0) {
-			intrinsic(print_number, sum);
+			intrinsic(print_int, sum);
 			return sum;
 		};
-		minused: Num = num - 1;
+		minused: Int = num - 1;
 		send(summing, minused);
 		return num + sum;
 	}

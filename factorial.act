@@ -13,3 +13,11 @@ actor factorial {
             return message * accumulator;
 	}
 }
+
+actor stupid {
+	state u: Unit;
+	initialiser {}
+	update(msg: for['a, 'b]. Pid['a]) {
+		send(msg[Num], 10);
+	}
+}

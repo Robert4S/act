@@ -1,4 +1,10 @@
-use std::{collections::BTreeSet, convert::identity, fs::File, io::Write, iter};
+use std::{
+    collections::{BTreeSet, HashMap},
+    convert::identity,
+    fs::File,
+    io::Write,
+    iter,
+};
 
 use codegen::{ir::immediates::Offset32, write_function};
 use cranelift::{
@@ -7,13 +13,11 @@ use cranelift::{
     object::{ObjectBuilder, ObjectModule},
     prelude::*,
 };
-use im::HashMap;
 use isa::CallConv;
 
 use super::frontend::{
-    cst::{self, Cst, Expr, Forall, ForallElim, Statement, TypeExpr},
+    cst::{self, Cst, Expr, Forall, ForallElim, Statement},
     tokenise::InfixToken,
-    typecheck::TypeChecker,
 };
 
 fn declare_variables(
@@ -100,8 +104,8 @@ pub struct Compiler {
     actors: Vec<Actor>,
     literal_counter: usize,
     globals: BTreeSet<String>,
+    statics: HashMap<Constant, DataId>,
     pub debug: bool,
-    pub typechecker: TypeChecker,
 }
 
 impl Default for Compiler {
@@ -125,7 +129,6 @@ impl Default for Compiler {
 
         let mut ctx = module.make_context();
         ctx.func.signature.call_conv = CallConv::SystemV;
-        let typechecker = TypeChecker::new(&[], vec![], vec![]);
 
         Self {
             builder_ctx: FunctionBuilderContext::new(),
@@ -136,9 +139,15 @@ impl Default for Compiler {
             literal_counter: 0,
             globals: BTreeSet::default(),
             debug: false,
-            typechecker,
+            statics: HashMap::new(),
         }
     }
+}
+
+#[derive(PartialEq, PartialOrd, Hash, Clone, Eq, Ord)]
+enum Constant {
+    Number(i64),
+    Bool(u8),
 }
 
 impl Compiler {
@@ -151,7 +160,7 @@ impl Compiler {
     pub fn compile(&mut self, cst: Cst) -> Result<(), ModuleError> {
         self.data_description.clear();
         let mut slots = vec![];
-        for a in &cst {
+        for a in &cst.actors {
             let name = &a.name;
             self.globals.insert(name.clone());
             let pid_slot = self
@@ -168,7 +177,7 @@ impl Compiler {
             slots.push(pid_slot);
         }
 
-        for (idx, a) in cst.into_iter().enumerate() {
+        for (idx, a) in cst.actors.into_iter().enumerate() {
             let pid_slot = slots[idx];
 
             self.translate_actor(a, pid_slot).unwrap();
@@ -294,6 +303,7 @@ impl Compiler {
         let actors = self.actors.clone();
 
         let mut trans = FunctionTranslator {
+            constants: &mut self.statics,
             int,
             builder,
             vars: HashMap::new(),
@@ -302,7 +312,6 @@ impl Compiler {
             globals: &self.globals,
             literal_count: &mut self.literal_counter,
             ret_block,
-            typechecker: &self.typechecker,
         };
 
         for actor in actors {
@@ -368,7 +377,6 @@ impl Compiler {
 
         // Now translate the statements of the function body.
         let mut trans = FunctionTranslator {
-            typechecker: &self.typechecker,
             int,
             builder,
             vars,
@@ -377,6 +385,7 @@ impl Compiler {
             globals: &self.globals,
             literal_count: &mut self.literal_counter,
             ret_block,
+            constants: &mut self.statics,
         };
 
         let returns = stmts
@@ -423,7 +432,7 @@ struct FunctionTranslator<'a> {
     globals: &'a BTreeSet<String>,
     literal_count: &'a mut usize,
     ret_block: Block,
-    typechecker: &'a TypeChecker,
+    constants: &'a mut HashMap<Constant, DataId>,
 }
 
 impl<'a> FunctionTranslator<'a> {
@@ -497,14 +506,11 @@ impl<'a> FunctionTranslator<'a> {
                 let block_then = self.builder.create_block();
                 let block_else = self.builder.create_block();
                 let block_merge = self.builder.create_block();
+                let rt = self.get_runtime();
 
                 let condition = self.translate_expr(condition);
-                let cond = self.builder.ins().load(
-                    types::I8,
-                    MemFlags::trusted(),
-                    condition,
-                    Offset32::new(0),
-                );
+                let cond =
+                    self.translate_call("unmask_int".into(), vec![rt, (condition, self.int)]);
 
                 self.builder
                     .ins()
@@ -557,24 +563,33 @@ impl<'a> FunctionTranslator<'a> {
 
     fn translate_expr(&mut self, expr: Expr) -> Value {
         match expr {
-            Expr::Number(f) => {
+            Expr::Float(f) => {
                 let imm = self.builder.ins().f64const(f);
-                self.make_number(imm)
+                self.make_float(imm)
+            }
+            Expr::Int(i) => {
+                let imm = self.builder.ins().iconst(self.int, i);
+                self.make_int(imm)
             }
             Expr::String(s) => self.translate_string(s),
             Expr::Symbol(name) => self.translate_symbol(name),
             Expr::Bool(b) => {
-                let imm = if b { 1 } else { 0 };
-                let imm = self.builder.ins().iconst(types::I8, imm);
+                let imm = self.builder.ins().iconst(self.int, b as i64);
                 self.make_bool(imm)
             }
-            Expr::Infix { left, op, right } => {
+
+            Expr::Infix {
+                left,
+                op,
+                right,
+                eq_typename_buf,
+            } => {
                 let left_v = self.translate_expr(*left.clone());
                 let right_v = self.translate_expr(*right);
                 if let Some(v) = self.direct_infix(left_v, op.clone(), right_v) {
                     v
                 } else {
-                    self.translate_eq(left_v, right_v, self.typechecker.expr_type(*left).unwrap())
+                    self.translate_eq(left_v, right_v, &eq_typename_buf.borrow())
                 }
             }
             Expr::ForallElim(ForallElim { expr, args: _ }) => self.translate_expr(*expr),
@@ -582,44 +597,63 @@ impl<'a> FunctionTranslator<'a> {
         }
     }
 
-    fn translate_eq(&mut self, left: Value, right: Value, type_: TypeExpr) -> Value {
-        let name = self.typechecker.eq_func_name(type_).unwrap();
-        self.translate_call(name, vec![(left, self.int), (right, self.int)])
+    fn translate_eq(&mut self, left: Value, right: Value, _name: &String) -> Value {
+        let rt = self.get_runtime();
+        self.translate_call(
+            "eq_val".to_string(),
+            vec![rt, (left, self.int), (right, self.int)],
+        )
     }
 
     fn direct_infix(&mut self, left: Value, op: InfixToken, right: Value) -> Option<Value> {
-        let float_inputs = &[
-            InfixToken::Plus,
-            InfixToken::Minus,
-            InfixToken::Mul,
-            InfixToken::Div,
-            InfixToken::Greater,
-            InfixToken::LE,
-            InfixToken::GE,
-            InfixToken::Lesser,
-        ];
-
         let float_output: Option<Box<dyn Fn(Value, Value, FuncInstBuilder) -> Value>> = match op {
-            InfixToken::Plus => Some(Box::new(|left, right, ins| ins.fadd(left, right))),
-            InfixToken::Minus => Some(Box::new(|left, right, ins| ins.fsub(left, right))),
-            InfixToken::Mul => Some(Box::new(|left, right, ins| ins.fmul(left, right))),
-            InfixToken::Div => Some(Box::new(|left, right, ins| ins.fdiv(left, right))),
+            InfixToken::PlusFloat => Some(Box::new(|left, right, ins| ins.fadd(left, right))),
+            InfixToken::MinusFloat => Some(Box::new(|left, right, ins| ins.fsub(left, right))),
+            InfixToken::MulFloat => Some(Box::new(|left, right, ins| ins.fmul(left, right))),
+            InfixToken::DivFloat => Some(Box::new(|left, right, ins| ins.fdiv(left, right))),
+
+            _ => None,
+        };
+
+        let int_output: Option<Box<dyn Fn(Value, Value, FuncInstBuilder) -> Value>> = match op {
+            InfixToken::Plus => Some(Box::new(|left, right, ins| ins.iadd(left, right))),
+            InfixToken::Minus => Some(Box::new(|left, right, ins| ins.isub(left, right))),
+            InfixToken::Mul => Some(Box::new(|left, right, ins| ins.imul(left, right))),
+            InfixToken::Mod => Some(Box::new(|left, right, ins| ins.srem(left, right))),
+
             _ => None,
         };
 
         let bool_output_float_input: Option<Box<dyn Fn(Value, Value, FuncInstBuilder) -> Value>> =
             match op {
-                InfixToken::Greater => Some(Box::new(|left, right, ins| {
+                InfixToken::GreaterFloat => Some(Box::new(|left, right, ins| {
                     ins.fcmp(FloatCC::GreaterThan, left, right)
                 })),
-                InfixToken::Lesser => Some(Box::new(|left, right, ins| {
+                InfixToken::LesserFloat => Some(Box::new(|left, right, ins| {
                     ins.fcmp(FloatCC::LessThan, left, right)
                 })),
-                InfixToken::GE => Some(Box::new(|left, right, ins| {
+                InfixToken::GEFloat => Some(Box::new(|left, right, ins| {
                     ins.fcmp(FloatCC::GreaterThanOrEqual, left, right)
                 })),
-                InfixToken::LE => Some(Box::new(|left, right, ins| {
+                InfixToken::LEFloat => Some(Box::new(|left, right, ins| {
                     ins.fcmp(FloatCC::LessThanOrEqual, left, right)
+                })),
+                _ => None,
+            };
+
+        let bool_output_int_input: Option<Box<dyn Fn(Value, Value, FuncInstBuilder) -> Value>> =
+            match op {
+                InfixToken::Greater => Some(Box::new(|left, right, ins| {
+                    ins.icmp(IntCC::SignedGreaterThan, left, right)
+                })),
+                InfixToken::Lesser => Some(Box::new(|left, right, ins| {
+                    ins.icmp(IntCC::SignedLessThan, left, right)
+                })),
+                InfixToken::GE => Some(Box::new(|left, right, ins| {
+                    ins.icmp(IntCC::SignedGreaterThanOrEqual, left, right)
+                })),
+                InfixToken::LE => Some(Box::new(|left, right, ins| {
+                    ins.icmp(IntCC::SignedLessThanOrEqual, left, right)
                 })),
                 _ => None,
             };
@@ -630,30 +664,60 @@ impl<'a> FunctionTranslator<'a> {
                 InfixToken::Or => Some(Box::new(|left, right, ins| ins.bor(left, right))),
                 _ => None,
             };
-        let left_float =
-            self.builder
-                .ins()
-                .load(types::F64, MemFlags::trusted(), left, Offset32::new(0));
-        let right_float =
-            self.builder
-                .ins()
-                .load(types::F64, MemFlags::trusted(), right, Offset32::new(0));
-        if let Some(f) = float_output {
+
+        let rt = self.get_runtime();
+
+        if let InfixToken::Div = op {
+            let rt = self.get_runtime();
+            let divved = self.translate_call(
+                "eval_int_div".to_string(),
+                vec![rt, (left, self.int), (right, self.int)],
+            );
+            return Some(divved);
+        }
+
+        if let Some(f) = int_output {
+            let left_int = self.translate_call("unmask_int".into(), vec![rt, (left, self.int)]);
+            let right_int = self.translate_call("unmask_int".into(), vec![rt, (right, self.int)]);
+
+            let res = f(left_int, right_int, self.builder.ins());
+            Some(self.make_int(res))
+        } else if let Some(f) = bool_output_int_input {
+            let left_int = self.translate_call("unmask_int".into(), vec![rt, (left, self.int)]);
+            let right_int = self.translate_call("unmask_int".into(), vec![rt, (right, self.int)]);
+            let res = f(left_int, right_int, self.builder.ins());
+            let res = self.builder.ins().sextend(self.int, res);
+            Some(self.make_bool(res))
+        } else if let Some(f) = float_output {
+            let left_float =
+                self.builder
+                    .ins()
+                    .load(types::F64, MemFlags::trusted(), left, Offset32::new(0));
+            let right_float =
+                self.builder
+                    .ins()
+                    .load(types::F64, MemFlags::trusted(), right, Offset32::new(0));
+
             let res = f(left_float, right_float, self.builder.ins());
-            Some(self.make_number(res))
+            Some(self.make_float(res))
         } else if let Some(f) = bool_output_float_input {
+            let left_float =
+                self.builder
+                    .ins()
+                    .load(types::F64, MemFlags::trusted(), left, Offset32::new(0));
+            let right_float =
+                self.builder
+                    .ins()
+                    .load(types::F64, MemFlags::trusted(), right, Offset32::new(0));
+
             let res = f(left_float, right_float, self.builder.ins());
+            let res = self.builder.ins().sextend(self.int, res);
             Some(self.make_bool(res))
         } else if let Some(f) = bool_output_bool_input {
-            let left =
-                self.builder
-                    .ins()
-                    .load(types::I8, MemFlags::trusted(), left, Offset32::new(0));
-            let right =
-                self.builder
-                    .ins()
-                    .load(types::I8, MemFlags::trusted(), right, Offset32::new(0));
-            let val = f(left, right, self.builder.ins());
+            let left_int = self.translate_call("unmask_int".into(), vec![rt, (left, self.int)]);
+            let right_int = self.translate_call("unmask_int".into(), vec![rt, (right, self.int)]);
+
+            let val = f(left_int, right_int, self.builder.ins());
 
             Some(self.make_bool(val))
         } else {
@@ -713,22 +777,25 @@ impl<'a> FunctionTranslator<'a> {
         self.translate_call(name, args)
     }
 
-    fn make_number(&mut self, number: Value) -> Value {
+    fn make_float(&mut self, number: Value) -> Value {
         let rt = self.get_runtime();
-        let addr = self.translate_call("make_gc_number".to_string(), vec![rt]);
+        let addr = self.translate_call("make_gc_float".to_string(), vec![rt]);
         self.builder
             .ins()
             .store(MemFlags::trusted(), number, addr, Offset32::new(0));
         addr
     }
 
+    fn make_int(&mut self, number: Value) -> Value {
+        let rt = self.get_runtime();
+        let imm = self.translate_call("make_gc_int".to_string(), vec![rt, (number, self.int)]);
+        imm
+    }
+
     fn make_bool(&mut self, bool: Value) -> Value {
         let rt = self.get_runtime();
-        let addr = self.translate_call("make_gc_bool".to_string(), vec![rt]);
-        self.builder
-            .ins()
-            .store(MemFlags::trusted(), bool, addr, Offset32::new(0));
-        addr
+        let imm = self.translate_call("make_gc_bool".to_string(), vec![rt, (bool, self.int)]);
+        imm
     }
 
     fn translate_call(&mut self, name: String, args: Vec<(Value, Type)>) -> Value {

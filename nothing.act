@@ -1,0 +1,5 @@
+actor nothing {
+	state u: Unit;
+	initialiser {}
+	update['a] (msg: 'a) {}
+}

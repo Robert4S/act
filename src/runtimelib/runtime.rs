@@ -147,7 +147,6 @@ pub struct RT {
     statics: Mutex<Vec<Gc>>,
     allocator: Mutex<Alloc>,
     pid_counter: AtomicUsize,
-    epoch: AtomicUsize,
 }
 
 impl RT {
@@ -158,7 +157,6 @@ impl RT {
             statics: Mutex::new(Vec::new()),
             allocator: Mutex::new(Alloc::new()),
             pid_counter: AtomicUsize::new(0),
-            epoch: AtomicUsize::new(0),
         }
     }
 
@@ -193,11 +191,9 @@ impl RT {
     pub fn supervise(rt: Arc<Self>) {
         let mut set = HashSet::new();
         loop {
-            let e = rt.epoch.fetch_add(1, Ordering::SeqCst);
-
             // TODO: Make sure an actor does not get more than one message to respond to in each
             // scheduling epoch
-            let mut mailboxes = rt.mailboxes.lock();
+            let mut mailboxes = unsafe { rt.mailboxes.make_guard_unchecked() };
             let messages = mailboxes.pop_messages(current_num_threads());
 
             drop(mailboxes);
@@ -211,13 +207,12 @@ impl RT {
                 .collect();
 
             unsafe {
-                if rt.allocator.make_guard_unchecked().heap_limit_reached() {
+                let mut l = rt.allocator.make_guard_unchecked();
+                if l.heap_limit_reached() {
                     rt.live_values(&mut set);
-                    rt.allocator.lock().free_nonreachable(&set);
+                    l.free_nonreachable(&set);
                     set.clear();
-                    rt.allocator
-                        .make_guard_unchecked()
-                        .update_heap_limit(2., 1e6 as usize);
+                    l.update_heap_limit(2., 1_000_000);
                 }
                 if rt.mailboxes.make_guard_unchecked().is_empty() {
                     rt.destruct();
@@ -227,13 +222,14 @@ impl RT {
         }
     }
 
+    // Used by actor
     pub fn send_actor(&self, actor: Gc, value: Gc) {
         let actor = unsafe { actor.ptr::<Pid>().read() };
         self.mailboxes.lock().push_message(actor, value);
     }
 
     pub fn find_reachable_vals(&self, pid: &Pid, marks: &mut HashSet<Gc>) {
-        let mailboxes = self.mailboxes.lock();
+        let mailboxes = unsafe { self.mailboxes.make_guard_unchecked() };
 
         let mailbox = unsafe {
             mailboxes
@@ -270,7 +266,7 @@ impl RT {
     }
 
     fn live_values(&self, marks: &mut HashSet<Gc>) {
-        let statics = self.statics.lock();
+        let statics = unsafe { self.statics.make_guard_unchecked() };
         let statics_clone = statics.clone();
         drop(statics);
 
@@ -278,7 +274,7 @@ impl RT {
             Alloc::mark(static_var, self, marks);
         }
 
-        let mailboxes = self.mailboxes.lock();
+        let mailboxes = unsafe { self.mailboxes.make_guard_unchecked() };
 
         let nonempty: Vec<Pid> = mailboxes.get_queue_deduped();
 

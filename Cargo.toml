@@ -9,6 +9,5 @@ crate-type=["staticlib"]
 [dependencies]
 clap = { version = "4.5.35", features = ["derive"] }
 cranelift = { version = "0.118.0", features = ["module", "object", "native"] }
-im = "15.1.0"
 parking_lot = "0.12.3"
 rayon = "1.10.0"

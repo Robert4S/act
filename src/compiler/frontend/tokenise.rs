@@ -1,4 +1,4 @@
-use im::Vector;
+use std::collections::VecDeque;
 
 pub type Token = (TokenKind, usize);
 
@@ -15,6 +15,7 @@ pub enum TokenKind {
     Dot,
     Lsquare,
     Rsquare,
+    Assign,
 
     // Keywords
     Not,
@@ -31,10 +32,13 @@ pub enum TokenKind {
     Daemon,
     Intrinsic,
     Forall,
+    Type,
+    NewType,
 
     // Rules
     Infix(InfixToken),
-    Number(f64),
+    Float(f64),
+    Int(i64),
     Symbol(String),
     String(String),
     TypeName(String),
@@ -47,21 +51,29 @@ pub enum TokenKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InfixToken {
     Plus,
+    PlusFloat,
     Minus,
+    MinusFloat,
+    Mod,
+    Mul,
+    MulFloat,
+    Div,
+    DivFloat,
+    GE,
+    GEFloat,
+    LE,
+    LEFloat,
+    Greater,
+    GreaterFloat,
+    Lesser,
+    LesserFloat,
     And,
     Or,
-    GE,
-    LE,
-    Greater,
-    Lesser,
     Equal,
-    Mul,
-    Div,
-    Assign,
 }
 
 pub fn tokenize_all<'a>(input: &'a [char]) -> Option<Vec<Token>> {
-    let mut line_num = 0;
+    let mut line_num = 1;
     let mut tokens = vec![];
     let mut input = input.to_vec();
     while !input.is_empty() {
@@ -80,6 +92,9 @@ pub fn tokenize<'a>(input: &'a [char], line_number: usize) -> Option<(Token, Vec
         ['(', rest @ ..] => Some(((TokenKind::Lparen, line_number), rest.to_owned())),
         [')', rest @ ..] => Some(((TokenKind::Rparen, line_number), rest.to_owned())),
         ['∀', rest @ ..] => Some(((TokenKind::Forall, line_number), rest.to_owned())),
+        ['=', rest @ ..] if rest.first().map(|c| *c != '=').unwrap_or(true) => {
+            Some(((TokenKind::Assign, line_number), rest.to_owned()))
+        }
         ['{', rest @ ..] => Some(((TokenKind::Lbrac, line_number), rest.to_owned())),
         ['}', rest @ ..] => Some(((TokenKind::Rbrac, line_number), rest.to_owned())),
         [',', rest @ ..] => Some(((TokenKind::Comma, line_number), rest.to_owned())),
@@ -138,18 +153,26 @@ fn tokenise_typevar<'a>(input: &'a [char], line_number: usize) -> Option<(Token,
 
 fn tokenise_infix<'a>(input: &'a [char], line_number: usize) -> Option<(Token, Vec<char>)> {
     match input {
+        ['>', '=', '.', rest @ ..] => Some((InfixToken::GEFloat, rest)),
+        ['<', '=', '.', rest @ ..] => Some((InfixToken::LEFloat, rest)),
         ['=', '=', rest @ ..] => Some((InfixToken::Equal, rest)),
         ['>', '=', rest @ ..] => Some((InfixToken::GE, rest)),
         ['<', '=', rest @ ..] => Some((InfixToken::LE, rest)),
         ['&', '&', rest @ ..] => Some((InfixToken::And, rest)),
         ['|', '|', rest @ ..] => Some((InfixToken::Or, rest)),
+        ['+', '.', rest @ ..] => Some((InfixToken::PlusFloat, rest)),
+        ['-', '.', rest @ ..] => Some((InfixToken::MinusFloat, rest)),
+        ['*', '.', rest @ ..] => Some((InfixToken::MulFloat, rest)),
+        ['/', '.', rest @ ..] => Some((InfixToken::DivFloat, rest)),
+        ['>', '.', rest @ ..] => Some((InfixToken::GreaterFloat, rest)),
+        ['<', '.', rest @ ..] => Some((InfixToken::LesserFloat, rest)),
         ['>', rest @ ..] => Some((InfixToken::Greater, rest)),
         ['<', rest @ ..] => Some((InfixToken::Lesser, rest)),
         ['+', rest @ ..] => Some((InfixToken::Plus, rest)),
         ['*', rest @ ..] => Some((InfixToken::Mul, rest)),
         ['-', rest @ ..] => Some((InfixToken::Minus, rest)),
         ['/', rest @ ..] => Some((InfixToken::Div, rest)),
-        ['=', rest @ ..] => Some((InfixToken::Assign, rest)),
+        ['%', rest @ ..] => Some((InfixToken::Mod, rest)),
         _ => None,
     }
     .map(|(t, r)| ((TokenKind::Infix(t), line_number), r.to_owned()))
@@ -190,11 +213,16 @@ fn tokenise_number<'a>(input: &'a [char], line_number: usize) -> Option<(Token, 
         _ => (),
     }
 
+    if right.is_empty() {
+        let n = left.parse::<i64>().ok()?;
+        return Some(((TokenKind::Int(n), line_number), input.to_vec()));
+    }
+
     left.push('.');
     left.push_str(&right);
 
     let n = left.parse::<f64>().ok()?;
-    Some(((TokenKind::Number(n), line_number), input.to_vec()))
+    Some(((TokenKind::Float(n), line_number), input.to_vec()))
 }
 
 fn tokenise_typename<'a>(input: &'a [char], line_number: usize) -> Option<(Token, Vec<char>)> {
@@ -208,7 +236,7 @@ fn tokenise_typename<'a>(input: &'a [char], line_number: usize) -> Option<(Token
 
     while let [c, rest @ ..] = input {
         if cannot_contain.contains(c) || c.is_whitespace() {
-            let mut rest: Vector<_> = rest.into();
+            let mut rest: VecDeque<_> = rest.iter().cloned().collect();
             rest.push_front(*c);
             return Some((
                 (TokenKind::TypeName(s), line_number),
@@ -232,7 +260,7 @@ fn tokenise_symbol<'a>(input: &'a [char], line_number: usize) -> Option<(Token, 
 
     while let [c, rest @ ..] = input {
         if cannot_contain.contains(c) || c.is_whitespace() {
-            let mut rest: Vector<_> = rest.into();
+            let mut rest: VecDeque<_> = rest.iter().cloned().collect();
             rest.push_front(*c);
             return Some((
                 (TokenKind::Symbol(s), line_number),
@@ -281,6 +309,8 @@ fn update_keyword(token: Token) -> Token {
             match s.as_str() {
                 "actor" => TokenKind::Actor,
                 "daemon" => TokenKind::Daemon,
+                "type" => TokenKind::Type,
+                "newtype" => TokenKind::NewType,
                 "send" => TokenKind::Send,
                 "for" => TokenKind::Forall,
                 "return" => TokenKind::Return,
