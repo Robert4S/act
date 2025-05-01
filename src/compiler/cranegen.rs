@@ -16,7 +16,7 @@ use cranelift::{
 use isa::CallConv;
 
 use super::frontend::{
-    cst::{self, Cst, Expr, Forall, ForallElim, Statement},
+    cst::{self, Cst, Expr, Forall, ForallElim, RecordExpr, Statement},
     tokenise::InfixToken,
 };
 
@@ -104,7 +104,6 @@ pub struct Compiler {
     actors: Vec<Actor>,
     literal_counter: usize,
     globals: BTreeSet<String>,
-    statics: HashMap<Constant, DataId>,
     pub debug: bool,
 }
 
@@ -139,15 +138,8 @@ impl Default for Compiler {
             literal_counter: 0,
             globals: BTreeSet::default(),
             debug: false,
-            statics: HashMap::new(),
         }
     }
-}
-
-#[derive(PartialEq, PartialOrd, Hash, Clone, Eq, Ord)]
-enum Constant {
-    Number(i64),
-    Bool(u8),
 }
 
 impl Compiler {
@@ -303,7 +295,6 @@ impl Compiler {
         let actors = self.actors.clone();
 
         let mut trans = FunctionTranslator {
-            constants: &mut self.statics,
             int,
             builder,
             vars: HashMap::new(),
@@ -385,7 +376,6 @@ impl Compiler {
             globals: &self.globals,
             literal_count: &mut self.literal_counter,
             ret_block,
-            constants: &mut self.statics,
         };
 
         let returns = stmts
@@ -432,7 +422,6 @@ struct FunctionTranslator<'a> {
     globals: &'a BTreeSet<String>,
     literal_count: &'a mut usize,
     ret_block: Block,
-    constants: &'a mut HashMap<Constant, DataId>,
 }
 
 impl<'a> FunctionTranslator<'a> {
@@ -486,7 +475,6 @@ impl<'a> FunctionTranslator<'a> {
                 true
             }
             Statement::Actor(_actor) => todo!(),
-            Statement::Daemon(_actor) => todo!(),
             Statement::Send { destination, value } => {
                 let destination = self.translate_expr(destination);
                 let value = self.translate_expr(value);
@@ -594,6 +582,44 @@ impl<'a> FunctionTranslator<'a> {
             }
             Expr::ForallElim(ForallElim { expr, args: _ }) => self.translate_expr(*expr),
             Expr::Forall(Forall { vars: _, then }) => self.translate_expr(*then),
+            Expr::Record(RecordExpr {
+                t: _,
+                fields,
+                actual,
+            }) => {
+                let rt = self.get_runtime();
+                let size = fields.len() * 8;
+                let imm = self.builder.ins().iconst(self.int, size as i64);
+                let block = self.translate_call("alloc_record".into(), vec![rt, (imm, self.int)]);
+                let mut val_offsets = vec![];
+                let t = actual.borrow();
+                let field_offsets = &t.as_ref().unwrap().fields;
+                for (name, expr) in fields {
+                    let v = self.translate_expr(expr);
+                    let offsetnum = field_offsets.get(&name).unwrap().0 * 8;
+                    let o = Offset32::new(offsetnum as i32);
+                    val_offsets.push((v, o));
+                }
+
+                for (val, offset) in val_offsets {
+                    self.builder
+                        .ins()
+                        .store(MemFlags::trusted(), val, block, offset);
+                }
+
+                block
+            }
+            Expr::FieldAccess {
+                from,
+                offset,
+                fieldname: _,
+            } => {
+                let from_block = self.translate_expr(*from);
+                let offset = Offset32::new((*offset.borrow() * 8) as i32);
+                self.builder
+                    .ins()
+                    .load(self.int, MemFlags::trusted(), from_block, offset)
+            }
         }
     }
 

@@ -24,7 +24,7 @@ pub fn is_integer(value: Gc) -> bool {
     (p & TAG_MASK) == TAG_MASK
 }
 
-use super::runtime::{self, Pid, RT};
+use super::runtime::{Pid, RT};
 
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]

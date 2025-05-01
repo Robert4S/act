@@ -77,7 +77,7 @@ fn compile() -> Result<(), String> {
         });
 
     let _ = TypeChecker::validate_prog(tree.clone())
-        .map_err(|e| format!("Error during validation: {e}"))?;
+        .map_err(|e| format!("Error during validation: {e:?}"))?;
 
     gen_cranelift(tree, args.debug, &format!("{stem}.o"))?;
 
@@ -100,13 +100,13 @@ fn compile() -> Result<(), String> {
     fs::rename(format!("{stem}"), format!("./act_bin/{stem}")).map_err(|e| e.to_string())
 }
 
-fn gen_cranelift(instrs: Cst, debug: bool, name: &str) -> Result<(), String> {
+fn gen_cranelift(cst: Cst, debug: bool, name: &str) -> Result<(), String> {
     let mut compiler = Compiler::default();
 
     compiler.debug = debug;
 
     compiler
-        .compile(instrs)
+        .compile(cst)
         .map_err(|e| format!("Code generation error: {}", e.to_string()))?;
     compiler.finish(name);
     Ok(())

@@ -3,4 +3,5 @@
 /release.tar.gz
 /lines.txt
 /act_bin
+/release.sh
 *.bak

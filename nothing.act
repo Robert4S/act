@@ -1,5 +1,16 @@
-actor nothing {
+type Product = {n1: Int, n2: Int};
+type Single = {s: String};
+type Z = {p: Product, s: Single};
+
+actor m {
 	state u: Unit;
-	initialiser {}
-	update['a] (msg: 'a) {}
+	initialiser {
+		let p = Product {n1 = 1, n2 = 2};
+		let s = Single {s = "Hello world\n"};
+		let pr = P {p = p, s = s};
+		let sum = pr.p.n1 + pr.p.n2;
+		intrinsic(print_int, sum);
+		intrinsic(print_string, pr.s.s);
+	}
+	update(x: Unit) {}
 }

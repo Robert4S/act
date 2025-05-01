@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, fmt::Display};
 
 pub type Token = (TokenKind, usize);
 
@@ -34,6 +34,7 @@ pub enum TokenKind {
     Forall,
     Type,
     NewType,
+    Let,
 
     // Rules
     Infix(InfixToken),
@@ -42,7 +43,6 @@ pub enum TokenKind {
     Symbol(String),
     String(String),
     TypeName(String),
-    TypeVar(String),
 
     // EOF
     EOF,
@@ -70,6 +70,34 @@ pub enum InfixToken {
     And,
     Or,
     Equal,
+}
+
+impl Display for InfixToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let symbol = match self {
+            InfixToken::Plus => "+",
+            InfixToken::PlusFloat => "+.",
+            InfixToken::Minus => "-",
+            InfixToken::MinusFloat => "-.",
+            InfixToken::Mod => "%",
+            InfixToken::Mul => "*",
+            InfixToken::MulFloat => "*.",
+            InfixToken::Div => "/",
+            InfixToken::DivFloat => "/.",
+            InfixToken::GE => ">=",
+            InfixToken::GEFloat => ">=.",
+            InfixToken::LE => "<=",
+            InfixToken::LEFloat => "<=.",
+            InfixToken::Greater => ">",
+            InfixToken::GreaterFloat => ">.",
+            InfixToken::Lesser => "<",
+            InfixToken::LesserFloat => "<.",
+            InfixToken::And => "&&",
+            InfixToken::Or => "||",
+            InfixToken::Equal => "==",
+        };
+        write!(f, "{}", symbol)
+    }
 }
 
 pub fn tokenize_all<'a>(input: &'a [char]) -> Option<Vec<Token>> {
@@ -127,7 +155,6 @@ pub fn tokenize<'a>(input: &'a [char], line_number: usize) -> Option<(Token, Vec
         other => vec![
             tokenise_number,
             tokenise_infix,
-            tokenise_typevar,
             tokenise_symbol,
             tokenise_typename,
             tokenise_string,
@@ -135,19 +162,6 @@ pub fn tokenize<'a>(input: &'a [char], line_number: usize) -> Option<(Token, Vec
         .iter()
         .filter_map(|f| f(other, line_number))
         .next(),
-    }
-}
-
-fn tokenise_typevar<'a>(input: &'a [char], line_number: usize) -> Option<(Token, Vec<char>)> {
-    if let ['\'', rest @ ..] = input {
-        let (name, rest) = tokenise_symbol(rest, line_number)?;
-        if let TokenKind::Symbol(s) = name.0 {
-            Some(((TokenKind::TypeVar(s), name.1), rest))
-        } else {
-            panic!()
-        }
-    } else {
-        None
     }
 }
 
@@ -255,7 +269,7 @@ fn tokenise_symbol<'a>(input: &'a [char], line_number: usize) -> Option<(Token, 
         _ => "".to_string(),
     };
     let mut input = input;
-    let cannot_contain = "{}\"(),;.:[]".chars().collect::<Vec<char>>();
+    let cannot_contain = "{}\"(),;.:[]&|!+-=*/\\".chars().collect::<Vec<char>>();
     let cannot_contain = cannot_contain.as_slice();
 
     while let [c, rest @ ..] = input {
@@ -323,6 +337,7 @@ fn update_keyword(token: Token) -> Token {
                 "if" => TokenKind::If,
                 "else" => TokenKind::Else,
                 "intrinsic" => TokenKind::Intrinsic,
+                "let" => TokenKind::Let,
                 _ => TokenKind::Symbol(s),
             },
             n,

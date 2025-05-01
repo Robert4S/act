@@ -59,13 +59,13 @@ pub extern "C" fn make_actor_global(
 }
 
 #[no_mangle]
-pub extern "C" fn make_gc_int(rt: &RT, n: i64) -> Gc {
+pub extern "C" fn make_gc_int(_rt: &RT, n: i64) -> Gc {
     let res = gc::mask_integer(n);
     res
 }
 
 #[no_mangle]
-pub extern "C" fn unmask_int(rt: &RT, n: Gc) -> i64 {
+pub extern "C" fn unmask_int(_rt: &RT, n: Gc) -> i64 {
     gc::unmask_integer(n)
 }
 
@@ -75,7 +75,7 @@ pub extern "C" fn make_gc_float(rt: &RT) -> Gc {
 }
 
 #[no_mangle]
-pub extern "C" fn make_gc_bool(rt: &RT, b: bool) -> Gc {
+pub extern "C" fn make_gc_bool(_rt: &RT, b: bool) -> Gc {
     mask_integer(b as i64)
 }
 
@@ -191,7 +191,7 @@ pub unsafe extern "C" fn print_float(_rt: &RT, number: Gc) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn eval_int_div(rt: &RT, left: i64, right: i64) -> Gc {
+pub unsafe extern "C" fn eval_int_div(_rt: &RT, left: i64, right: i64) -> Gc {
     let res = left / right;
     mask_integer(res)
 }
@@ -201,4 +201,11 @@ pub unsafe extern "C" fn print_string(_rt: &RT, val: Gc) {
     let act_string = val.ptr::<ActString>().read();
     let s = act_string.to_str();
     print!("{s}");
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn alloc_record(rt: &RT, size: u32) -> Gc {
+    let gc = rt.make_gc(HeaderTag::TraceBlock, size);
+    std::ptr::write_bytes(gc.ptr::<u8>(), 0, size as usize);
+    gc
 }

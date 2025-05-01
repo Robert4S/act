@@ -1,5 +1,7 @@
+use anyhow::{anyhow, bail, Context};
+
 use super::{
-    cst::{Actor, Cst, Expr, Forall, ForallElim, Statement, TypeExpr, Update},
+    cst::{Actor, Cst, Expr, Forall, ForallElim, RecordType, Statement, TypeExpr, Update},
     tokenise::InfixToken,
 };
 use std::{
@@ -16,12 +18,19 @@ pub enum Kind {
     Function { args: Vec<Kind>, output: Box<Kind> },
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum Nominal {
+    Opaque(usize, Vec<(String, Kind)>),
+    Transparent(usize, TypeExpr),
+}
+
 #[derive(Debug)]
 pub struct TypeChecker {
     globals: HashMap<String, TypeExpr>,
     blocks: Vec<Block>,
-    aliases: HashMap<String, TypeExpr>,
-    base_types: HashSet<String>,
+    aliases: HashMap<String, Nominal>,
+    idx: usize,
+    records: HashMap<usize, RecordType>,
 }
 
 impl TypeChecker {
@@ -34,12 +43,64 @@ impl TypeChecker {
         for actor in actors {
             globals.insert(actor.name.clone(), Self::actor_type(actor.update.clone()));
         }
-        Self {
-            globals,
-            base_types,
-            blocks: Vec::new(),
-            aliases,
+
+        let mut idx = 0;
+        let mut intrinsics = HashMap::new();
+
+        for t in base_types {
+            idx += 1;
+            intrinsics.insert(t, Nominal::Opaque(idx, vec![]));
         }
+
+        let mut s = Self {
+            globals,
+            blocks: Vec::new(),
+            aliases: intrinsics,
+            idx,
+            records: HashMap::new(),
+        };
+
+        for (name, t) in aliases {
+            match t {
+                TypeExpr::RecordType(r) => {
+                    s.declare_record(name, vec![], r);
+                }
+                TypeExpr::Forall(Forall { vars, then })
+                    if matches!(*then, TypeExpr::RecordType(_)) =>
+                {
+                    let TypeExpr::RecordType(r) = *then else {
+                        unreachable!();
+                    };
+                    s.declare_record(name, vars, r);
+                }
+                other => {
+                    s.declare_structural(name, other);
+                }
+            }
+        }
+
+        // TODO: Validate aliases after all have been declared
+        s
+    }
+
+    fn declare_record(&mut self, name: String, vars: Vec<(String, Kind)>, r: RecordType) -> usize {
+        let rc = r.clone();
+        let id = self.declare_opaque(name, vars);
+        self.records.insert(id, rc);
+
+        id
+    }
+
+    fn declare_opaque(&mut self, name: String, vars: Vec<(String, Kind)>) -> usize {
+        self.aliases.insert(name, Nominal::Opaque(self.idx, vars));
+        self.idx += 1;
+        self.idx - 1
+    }
+
+    fn declare_structural(&mut self, name: String, t: TypeExpr) -> usize {
+        self.aliases.insert(name, Nominal::Transparent(self.idx, t));
+        self.idx += 1;
+        self.idx - 1
     }
 
     fn actor_type(updater: Update) -> TypeExpr {
@@ -60,72 +121,11 @@ impl TypeChecker {
 
     pub fn validate_prog(cst: Cst) -> Result<Self> {
         let mut tc = Self::new(&cst.actors, cst.aliases.clone(), cst.declarations);
-        let aliases: Vec<(String, TypeExpr)> = tc
-            .aliases
-            .iter()
-            .map(|(a, b)| (a.clone(), b.clone()))
-            .collect();
-
-        for (idx, alias) in aliases {
-            print!(
-                r#"Simplified {idx} from
-        {alias}
-            to
-        "#
-            );
-            let t = tc.simplify(alias)?;
-            println!("{t}");
-            tc.aliases.insert(idx, t);
-        }
 
         for actor in cst.actors {
             tc.validate_actor(actor)?;
         }
         Ok(tc)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum Error {
-    UnboundVar(String),
-    Mismatched {
-        want: TypeExpr,
-        got: TypeExpr,
-        expr: Expr,
-    },
-    BlockFinalised,
-    InitReturnMissing(String),
-    UpdateReturnMissing(String),
-    ApplicationToConcreteType(ForallElim<TypeExpr>),
-    WrongForallElimArity {
-        given: Vec<TypeExpr>,
-        to: Vec<Kind>,
-    },
-    ExpectedConcrete(TypeExpr),
-    KindMismatch {
-        want: Kind,
-        given: TypeExpr,
-        given_kind: Kind,
-    },
-    UnboundTypeVar(String),
-    UnknownBaseType(String),
-}
-
-impl Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::UnboundVar(s) => write!(f, "Unbound variable `{s}`"),
-            Error::Mismatched { want, got, expr } => write!(f, "`{expr:?}` was expected to have type `{want}`, but instead has type `{got}`"),
-            Error::BlockFinalised => panic!(),
-            Error::InitReturnMissing(name) => write!(f, "Actor `{name}`'s initialiser includes an implicit return, but it's return type is not `Unit`"),
-            Error::UpdateReturnMissing(name) => write!(f, "Actor `{name}`'s updater includes an implicit return, but it's return type is not `Unit`"),
-            Error::ApplicationToConcreteType(ForallElim { expr, args }) => write!(f, "Expected `{expr}` to be a constructor to be applied to `{}`", type_arg_list(args)),
-            Error::WrongForallElimArity { given, to } => write!(f, "Type arguments `{}` were given to a type abstraction `{}`", type_arg_list(given), Kind::Function { args: to.clone(), output: Box::new(Kind::Type) }),
-            Error::ExpectedConcrete(type_expr) => write!(f, "Expected `{type_expr}` to be a concrete type"),
-            Error::KindMismatch { want, given, given_kind } => write!(f, "Type expression `{given}` was expected to have kind `{want}`, but instead has kind `{given_kind}`"),
-            Error::UnboundTypeVar(n) => write!(f, "Type variable {n} is unbound"),
-            Error::UnknownBaseType(n) => write!(f, "Reference to unknown base type {n}")
-        }
     }
 }
 
@@ -141,13 +141,25 @@ impl Display for TypeExpr {
                 write!(f, "for ")?;
                 write!(f, "[{}]. {}", typevar_arg_list(&forall.vars), forall.then)
             }
-            TypeExpr::TypeVar(n) => write!(f, "'{n}"),
+            TypeExpr::TypeVar(n) => write!(f, "{n}"),
             TypeExpr::ForallElim(forall_elim) => write!(
                 f,
                 "{}[{}]",
                 *forall_elim.expr,
                 type_arg_list(&forall_elim.args)
             ),
+            TypeExpr::RecordType(RecordType { fields }) => {
+                write!(f, "{{")?;
+                let fields = fields.iter().collect::<Vec<_>>();
+                let Some((name, (_, t))) = fields.get(0) else {
+                    return write!(f, "}}");
+                };
+                write!(f, "{name} : {t}")?;
+                for (name, (_, t)) in &fields[1..] {
+                    write!(f, ", {name} : {t}")?;
+                }
+                write!(f, "}}")
+            }
         }
     }
 }
@@ -157,8 +169,8 @@ fn typevar_arg_list(args: &[(String, Kind)]) -> String {
         return String::new();
     };
     args.iter()
-        .fold(format!("'{first}:{first_kind}"), |acc, (name, kind)| {
-            format!("{acc}, '{name}:{kind}")
+        .fold(format!("{first}:{first_kind}"), |acc, (name, kind)| {
+            format!("{acc}, {name}:{kind}")
         })
 }
 
@@ -188,21 +200,42 @@ fn type_arg_list(args: &[TypeExpr]) -> String {
         .fold(first.to_string(), |acc, arg| format!("{acc}, {arg}"))
 }
 
-pub type Result<T> = core::result::Result<T, Error>;
+pub type Result<T> = anyhow::Result<T>;
 
 fn base_type(name: &str) -> TypeExpr {
     TypeExpr::Base(name.to_string())
 }
 
 impl TypeChecker {
+    fn get_alias(&self, name: &str) -> Result<&Nominal> {
+        self.aliases
+            .get(name)
+            .with_context(|| format!("Unknown type: `{name}`"))
+    }
+
     fn type_kind(&mut self, type_: &TypeExpr) -> Result<Kind> {
         match type_ {
             TypeExpr::Base(name) => {
-                if let Some(c) = self.aliases.get(name) {
-                    self.type_kind(&c.clone())
-                } else {
-                    Ok(Kind::Type)
+                let c = self.get_alias(&name)?.clone();
+                match c {
+                    Nominal::Opaque(_, kind) => {
+                        if kind.len() == 0 {
+                            Ok(Kind::Type)
+                        } else {
+                            Ok(Kind::Function {
+                                args: kind.iter().map(|(_, k)| k.clone()).collect(),
+                                output: Box::new(Kind::Type),
+                            })
+                        }
+                    }
+                    Nominal::Transparent(_, e) => self.type_kind(&e),
                 }
+            }
+            TypeExpr::RecordType(r) => {
+                for (_, t) in r.fields.values() {
+                    self.ensure_type(t.clone())?;
+                }
+                Ok(Kind::Type)
             }
             TypeExpr::Actor(_) => Ok(Kind::Type),
             TypeExpr::Universal(forall) => {
@@ -215,12 +248,19 @@ impl TypeChecker {
                     self.bind_typevar(name.clone(), kind.clone());
                 }
                 let args = forall.vars.iter().map(|(_, kind)| kind).cloned().collect();
-                let output = Box::new(self.type_kind(&forall.then)?);
+                self.ensure_type(*forall.then.clone())?;
                 self.pop_block();
-                Ok(Kind::Function { args, output })
+                Ok(Kind::Function {
+                    args,
+                    output: Box::new(Kind::Type),
+                })
             }
             TypeExpr::ForallElim(forall_elim) => match self.type_kind(&forall_elim.expr)? {
-                Kind::Type => Err(Error::ApplicationToConcreteType(forall_elim.clone())),
+                Kind::Type => Err(anyhow!(
+                    "Expected `{}` to be a constructor to be applied to `{}`",
+                    forall_elim.expr,
+                    type_arg_list(&forall_elim.args)
+                )),
                 Kind::Function { args, output } => {
                     self.verify_elim_args(forall_elim.args.clone(), args)?;
                     Ok(*output)
@@ -232,16 +272,19 @@ impl TypeChecker {
 
     fn verify_elim_args(&mut self, given: Vec<TypeExpr>, want: Vec<Kind>) -> Result<()> {
         if given.len() != want.len() {
-            return Err(Error::WrongForallElimArity { given, to: want });
+            bail!(
+                "Type arguments `{}` were given to a type abstraction `{}`",
+                type_arg_list(&given),
+                Kind::Function {
+                    args: want.clone(),
+                    output: Box::new(Kind::Type)
+                }
+            )
         }
         for (given, wanted) in given.into_iter().zip(want.into_iter()) {
             let given_kind = self.type_kind(&given)?;
             if given_kind != wanted {
-                return Err(Error::KindMismatch {
-                    want: wanted,
-                    given: given.clone(),
-                    given_kind,
-                });
+                bail!("Expected type `{given}` to have kind {wanted}, but instead it has kind {given_kind}")
             }
         }
         Ok(())
@@ -311,16 +354,59 @@ impl TypeChecker {
                     args: args?,
                 }))
             }
+            TypeExpr::RecordType(RecordType { fields }) => {
+                let new_fields: Result<HashMap<String, (usize, TypeExpr)>> = fields
+                    .into_iter()
+                    .map(|(name, (offset, t))| {
+                        Ok((
+                            name,
+                            (
+                                offset,
+                                self.substitute_typevar(t, with.clone(), var_name.clone())?,
+                            ),
+                        ))
+                    })
+                    .collect();
+
+                Ok(TypeExpr::RecordType(RecordType {
+                    fields: new_fields?,
+                }))
+            }
         }
     }
 
     fn elim_forall(&mut self, fe: ForallElim<TypeExpr>) -> Result<TypeExpr> {
-        let args: Result<Vec<TypeExpr>> = fe.args.into_iter().map(|a| self.simplify(a)).collect();
+        let args: Result<Vec<TypeExpr>> =
+            fe.args.iter().map(|a| self.simplify(a.clone())).collect();
         let args = args?;
+        let kinds: Vec<(TypeExpr, Kind)> = fe
+            .args
+            .iter()
+            .map(|arg| Ok((arg.clone(), self.type_kind(arg)?)))
+            .collect::<Result<_>>()?;
+        let wanted_kind = Kind::Function {
+            args: kinds.iter().map(|(_, k)| k.clone()).collect(),
+            output: Box::new(Kind::Type),
+        };
 
-        let f = match self.simplify(*fe.expr)? {
+        let f = match self.simplify(fe.expr.as_ref().clone())? {
             TypeExpr::Forall(f) => f,
-            _ => panic!(),
+            TypeExpr::Base(name) => {
+                let Kind::Function { args, output: _ } =
+                    self.type_kind(&TypeExpr::Base(name.clone()))?
+                else {
+                    bail!("Type `{name}` was expected to have kind `{wanted_kind}`, but instead has kind `*`");
+                };
+
+                for ((have, have_kind), want_kind) in kinds.into_iter().zip(args) {
+                    if have_kind != want_kind {
+                        bail!("Type `{have}` was expected to have kind `{want_kind}`, but instead has kind `{have_kind}`");
+                    }
+                }
+
+                return Ok(TypeExpr::ForallElim(fe));
+            }
+            other => bail!("Expected type `{}` to have kind `{wanted_kind}` to be applied to type arguments, but instead it has kind `{}`", other, /*self.type_kind(&other)?*/ "cock"),
         };
 
         let zipped: Vec<_> = args.into_iter().zip(f.vars.into_iter()).collect();
@@ -332,25 +418,62 @@ impl TypeChecker {
             }
             subbed = self.substitute_typevar(subbed, arg, name)?;
         }
-        self.simplify(subbed)
+        let t = self.simplify(subbed)?;
+        self.ensure_type(t.clone())?;
+        Ok(t)
     }
 
     fn simplify(&mut self, type_: TypeExpr) -> Result<TypeExpr> {
         match type_ {
             TypeExpr::Base(name) => {
                 if let Some(e) = self.aliases.get(&name) {
-                    Ok(self.simplify(e.clone())?)
-                } else if self.base_types.contains(&name) {
-                    Ok(TypeExpr::Base(name))
+                    match e {
+                        Nominal::Transparent(_, t) => self.simplify(t.clone()),
+                        Nominal::Opaque(_, _) => Ok(TypeExpr::Base(name)),
+                    }
                 } else {
-                    Err(Error::UnknownBaseType(name))
+                    Err(anyhow!("Unknown type `{name}`"))
                 }
             }
             TypeExpr::Forall(_) => Ok(type_),
             TypeExpr::Universal(_) => Ok(type_),
             TypeExpr::TypeVar(t) => Ok(TypeExpr::TypeVar(t)),
             TypeExpr::Actor(t) => Ok(TypeExpr::Actor(Box::new(self.simplify(*t)?))),
-            TypeExpr::ForallElim(forall_elim) => self.elim_forall(forall_elim),
+            TypeExpr::ForallElim(forall_elim) => {
+                if let TypeExpr::Base(n) = *(forall_elim.expr.clone()) {
+                    match self.get_alias(&n)?.clone() {
+                        Nominal::Opaque(_, opaque_args) => {
+                            let given: Result<Vec<_>> = forall_elim
+                                .args
+                                .iter()
+                                .cloned()
+                                .map(|a| self.type_kind(&a))
+                                .collect();
+
+                            let given = given?;
+
+                            if given
+                                != opaque_args
+                                    .iter()
+                                    .map(|(_, k)| k.clone())
+                                    .collect::<Vec<_>>()
+                            {
+                                panic!("{given:?}, want {opaque_args:?}")
+                            }
+                            return Ok(TypeExpr::ForallElim(forall_elim));
+                        }
+                        _ => (),
+                    };
+                }
+                self.elim_forall(forall_elim)
+            }
+            TypeExpr::RecordType(RecordType { fields }) => {
+                let fields: Result<_> = fields
+                    .into_iter()
+                    .map(|(name, (offset, t))| Ok((name, (offset, self.simplify(t)?))))
+                    .collect();
+                Ok(TypeExpr::RecordType(RecordType { fields: fields? }))
+            }
         }
     }
 
@@ -358,12 +481,34 @@ impl TypeChecker {
         let have_s = self.simplify(have)?;
         let want_s = self.simplify(want)?;
 
+        match (&have_s, &want_s) {
+            (TypeExpr::Base(h), TypeExpr::Base(w)) => {
+                let h = self
+                    .aliases
+                    .get(h)
+                    .with_context(|| anyhow!("Unknown type `{h}`"))?;
+                let w = self
+                    .aliases
+                    .get(w)
+                    .with_context(|| anyhow!("Unknown type `{w}`"))?;
+                match (h, w) {
+                    (Nominal::Opaque(i, _), Nominal::Opaque(u, _)) => {
+                        if i != u {
+                            bail!("Expected `{have_e}` to have type `{want_s}`, but instead it has type `{have_s}`")
+                        } else {
+                            return Ok(());
+                        }
+                    }
+                    _ => (),
+                }
+            }
+            _ => (),
+        }
+
         if have_s != want_s {
-            Err(Error::Mismatched {
-                want: want_s,
-                got: have_s,
-                expr: have_e,
-            })
+            Err(anyhow!(
+                "Expected `{have_e}` to have type `{want_s}`, but instead it has type `{have_s}`"
+            ))
         } else {
             Ok(())
         }
@@ -371,54 +516,59 @@ impl TypeChecker {
 
     fn ensure_type(&mut self, type_: TypeExpr) -> Result<()> {
         match self.type_kind(&type_)? {
-            Kind::Function { args: _, output: _ } => Err(Error::ExpectedConcrete(type_)),
+            Kind::Function { args: _, output: _ } => {
+                Err(anyhow!("Expected type `{type_}` to have kind `*`"))
+            }
             Kind::Type => Ok(()),
         }
     }
 
-    fn validate_stmt(&mut self, stmt: Statement) -> Result<()> {
+    fn validate_stmt(&mut self, stmt: Statement) -> Result<bool> {
         if self.current_block().finalised {
-            return Err(Error::BlockFinalised);
+            return Ok(true);
         }
         match stmt {
             Statement::Assignment(a) => {
-                self.ensure_type(a.type_.clone())?;
                 let right_type = self.expr_type(a.right.clone())?;
-                self.types_match(a.right, right_type, a.type_.clone())?;
-                self.declare_var(a.left, a.type_)?;
-                Ok(())
+                if let Some(t) = a.type_.clone() {
+                    self.ensure_type(t.clone())?;
+                    self.types_match(a.right, right_type.clone(), t)?;
+                }
+                self.declare_var(a.left, right_type)?;
+                Ok(false)
             }
-            Statement::Intrinsic {
-                func_name: _,
-                args: _,
-            } => Ok(()),
+            Statement::Intrinsic { func_name: _, args } => {
+                for e in args {
+                    let _ = self.expr_type(e)?;
+                }
+                Ok(false)
+            }
             Statement::Return(expr) => {
                 let got_t = self.expr_type(expr.clone())?;
                 let ret_t = self.current_block().return_type.clone();
                 match self.types_match(expr, got_t, ret_t) {
                     Ok(()) => {
                         self.current_block_mut().finalised = true;
-                        Ok(())
+                        Ok(true)
                     }
                     Err(e) => Err(e),
                 }
             }
-            Statement::Actor(a) => self.validate_actor(a),
-            Statement::Daemon(_) => panic!("Daemons are not supported"),
+            Statement::Actor(a) => {
+                self.validate_actor(a)?;
+                Ok(false)
+            }
             Statement::Send { destination, value } => {
                 let sent_t = self.expr_type(value.clone())?;
                 let dest_t = self.expr_type(destination.clone())?;
                 let dest_t_arg = match dest_t.clone() {
                     TypeExpr::Actor(a) => *a,
                     _ => {
-                        return Err(Error::Mismatched {
-                            want: TypeExpr::Actor(Box::new(sent_t.clone())),
-                            got: dest_t,
-                            expr: destination,
-                        })
+                        bail!("Expected `{destination}` to have type `{}`, but instead it has type `{dest_t}`", TypeExpr::Actor(Box::new(sent_t.clone())));
                     }
                 };
-                self.types_match(value, sent_t, dest_t_arg)
+                self.types_match(value, sent_t, dest_t_arg)?;
+                Ok(false)
             }
             Statement::If {
                 condition,
@@ -436,7 +586,7 @@ impl TypeChecker {
                 if then_term && else_term {
                     self.current_block_mut().finalised = true;
                 }
-                Ok(())
+                Ok(false)
             }
         }
     }
@@ -445,12 +595,12 @@ impl TypeChecker {
         self.push_block();
         for s in stmts {
             match self.validate_stmt(s) {
-                Err(Error::BlockFinalised) => break,
                 Err(e) => {
                     self.pop_block();
                     return Err(e);
                 }
-                _ => continue,
+                Ok(t) if t => break,
+                Ok(_) => continue,
             }
         }
         let terminates = self.current_block().finalised;
@@ -474,13 +624,14 @@ impl TypeChecker {
         let res = match type_ {
             TypeExpr::Base(n) => Ok(format!("eval_eq_{}", n.to_lowercase())),
             TypeExpr::Actor(_) => Ok(format!("eval_eq_pid")),
-            TypeExpr::Universal(_) => Err(Error::ExpectedConcrete(type_)),
+            TypeExpr::Universal(_) => Err(anyhow!("Expected type `{type_}` to have kind `*`")),
             TypeExpr::ForallElim(_) => {
                 let t = self.simplify(type_)?;
                 self.eq_func_name(t)
             }
-            TypeExpr::TypeVar(_) => Err(Error::ExpectedConcrete(type_)),
-            TypeExpr::Forall(_) => Err(Error::ExpectedConcrete(type_)),
+            TypeExpr::TypeVar(_) => Err(anyhow!("Expected type `{type_}` to have kind `*`")),
+            TypeExpr::Forall(_) => Err(anyhow!("Expected type `{type_}` to have kind `*`")),
+            TypeExpr::RecordType(_record_type) => todo!(),
         };
 
         match res {
@@ -520,11 +671,7 @@ impl TypeChecker {
                         expr: forall.then,
                         args: f.args,
                     }),
-                    other => Err(Error::Mismatched {
-                        want: wanted_t,
-                        got: other,
-                        expr: *f.expr,
-                    }),
+                    other => Err(anyhow!("Expected `{}` to have type `{wanted_t}`, but instead it has type `{other}`", *f.expr))
                 }
             }
             Expr::Forall(Forall { vars, then }) => {
@@ -543,8 +690,112 @@ impl TypeChecker {
                     then: Box::new(then_type),
                 }))
             }
+            Expr::Record(re) => {
+                let r = self.extract_record(re.t.clone(), Expr::Record(re.clone()))?;
+                *re.actual.borrow_mut() = Some(r.clone());
+                let rec_type_fields: Result<Vec<_>> = re
+                    .fields
+                    .iter()
+                    .map(|(name, e)| {
+                        Ok((
+                            name,
+                            e,
+                            &r.fields
+                                .get(name)
+                                .with_context(|| anyhow!("Type `{}` does not have field {name}", re.t.clone()))?
+                                .1,
+                        ))
+                    })
+                    .collect();
+
+                let t: Result<()> = r
+                    .fields
+                    .keys()
+                    .map(|f| {
+                        if !re.fields.contains_key(f) {
+                            Err(anyhow!("Type `{}` has field {f}, but it was missing during construction", re.t.clone()))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .collect();
+                let _ = t?;
+
+                let rtf = rec_type_fields?;
+
+                for (_, e, t) in rtf {
+                    let et = self.expr_type(e.clone())?;
+                    self.types_match(e.clone(), et, t.clone())?;
+                }
+
+                Ok(re.t)
+            }
+            Expr::FieldAccess {
+                from,
+                offset,
+                fieldname,
+            } => {
+                let from_t = self.expr_type(*(from.clone()))?;
+                let rec_t = self.extract_record(from_t.clone(), *from)?;
+                let (got_offset, t) =
+                    rec_t
+                        .fields
+                        .get(&fieldname)
+                        .with_context(|| anyhow!("Type `{from_t}` does not have field `{fieldname}`"))?;
+                *offset.borrow_mut() = *got_offset;
+                Ok(t.clone())
+            }
         }
         .and_then(|t| self.simplify(t))
+    }
+
+    fn get_record(&self, name: &str) -> Result<RecordType> {
+        match self.get_alias(name)? {
+            Nominal::Opaque(id, _) => self
+                .records
+                .get(id)
+                .cloned()
+                .with_context(|| anyhow!("Record constructor `{name}` is unbound")),
+            _ => Err(anyhow!("Record constructor `{name}` is unbound")),
+        }
+    }
+
+    fn extract_record(&mut self, t: TypeExpr, e: Expr) -> Result<RecordType> {
+        match self.simplify(t)? {
+            TypeExpr::Base(b) => self.get_record(&b),
+            TypeExpr::ForallElim(ForallElim { expr, args }) => {
+                let TypeExpr::Base(n) = *expr else { panic!() };
+                let r = self.get_record(&n)?;
+                let Nominal::Opaque(_, vars) = self
+                    .aliases
+                    .get(&n)
+                    .expect(&format!("Record type {n} is a transparent alias"))
+                else {
+                    panic!("Record type {n} is a transparent alias")
+                };
+
+                let TypeExpr::RecordType(r) = self.elim_forall(ForallElim {
+                    expr: Box::new(TypeExpr::Forall(Forall {
+                        vars: vars.clone(),
+                        then: Box::new(TypeExpr::RecordType(r)),
+                    })),
+                    args,
+                })?
+                else {
+                    panic!();
+                };
+                Ok(r)
+            }
+            TypeExpr::RecordType(t) => Ok(t),
+            other => {
+                bail!(
+                    "`{e}` was expected to have type `{}`, but instead has type `{other}`",
+                    TypeExpr::RecordType(RecordType {
+                        fields: HashMap::new()
+                    })
+                )
+            }
+        }
     }
 
     fn bind_typevar(&mut self, var_name: String, kind: Kind) {
@@ -554,7 +805,7 @@ impl TypeChecker {
     fn get_type_var(&self, var_name: &str) -> Result<Kind> {
         self.current_block()
             .var_kind(var_name)
-            .ok_or(Error::UnboundTypeVar(var_name.to_owned()))
+            .with_context(|| anyhow!("Type variable `{var_name}` is unbound"))
             .cloned()
     }
 
@@ -595,29 +846,17 @@ impl TypeChecker {
                     typename.replace_with(|_| self.eq_func_name(left.clone()).unwrap());
                     (left.clone(), left.clone(), base_type("Bool"))
                 } else {
-                    return Err(Error::Mismatched {
-                        want: left.clone(),
-                        got: right.clone(),
-                        expr: right_e,
-                    });
+                    bail!("Expected `{right_e}` to have type `{left}`, but instead has type `{right}`")
                 }
             }
         };
 
         if left != &left_t {
-            return Err(Error::Mismatched {
-                want: left_t,
-                got: left.clone(),
-                expr: left_e,
-            });
+            bail!("Expected `{left_e}` to have type `{left_t}`, but instead has type `{left}`")
         }
 
         if right != &right_t {
-            return Err(Error::Mismatched {
-                want: right_t,
-                got: right.clone(),
-                expr: right_e,
-            });
+            bail!("Expected `{right_e}` to have type `{right_t}`, but instead has type `{right}`")
         }
 
         Ok(out_t)
@@ -628,7 +867,7 @@ impl TypeChecker {
             Some(t) => Some(t),
             None => self.blocks.last().and_then(|b| b.var_type(var)),
         }
-        .ok_or(Error::UnboundVar(var.to_string()))
+        .with_context(|| anyhow!("Unbound variable: `{var}`"))
     }
 
     fn validate_actor(&mut self, actor: Actor) -> Result<()> {
@@ -639,7 +878,7 @@ impl TypeChecker {
         self.current_block_mut().return_type = state_type.clone();
         let init_returns = self.validate_block(actor.initialiser.body.iter().cloned())?;
         if !init_returns && state_type != base_type("Unit") {
-            return Err(Error::InitReturnMissing(actor.name));
+            bail!("Actor `{}`'s initialiser does not return for all paths, and its return type is not `Unit`", actor.name)
         }
         self.pop_block();
 
@@ -652,7 +891,7 @@ impl TypeChecker {
 
         let update_returns = self.validate_block(actor.update.body.iter().cloned())?;
         if !update_returns && state_type != base_type("Unit") {
-            return Err(Error::UpdateReturnMissing(actor.name));
+            bail!("Actor `{}`'s updater does not return for all paths, and its return type is not `Unit`", actor.name)
         }
         self.pop_block();
         Ok(())
