@@ -209,3 +209,14 @@ pub unsafe extern "C" fn alloc_record(rt: &RT, size: u32) -> Gc {
     std::ptr::write_bytes(gc.ptr::<u8>(), 0, size as usize);
     gc
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn int_to_string(rt: &RT, i: Gc, strbuf: Gc) {
+    let strbuf = strbuf.ptr::<ActString>();
+    let istr = unmask_integer(i).to_string();
+    let length = istr.len();
+    let data = rt.make_gc(HeaderTag::Raw, length as u32);
+    let length_ptr = rt.make_gc(HeaderTag::Raw, 8);
+    let strdata = ActString::from_str(data, length_ptr, &istr);
+    strbuf.write(strdata);
+}

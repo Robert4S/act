@@ -80,6 +80,12 @@ impl TypeChecker {
         }
 
         // TODO: Validate aliases after all have been declared
+        for (name, nominal) in s.aliases.clone() {
+            if let Nominal::Transparent(id, t) = nominal {
+                let simplified = s.simplify(t).unwrap();
+                s.aliases.insert(name, Nominal::Transparent(id, simplified));
+            }
+        }
         s
     }
 
@@ -266,7 +272,9 @@ impl TypeChecker {
                     Ok(*output)
                 }
             },
-            TypeExpr::TypeVar(n) => self.get_type_var(n),
+            TypeExpr::TypeVar(n) => self
+                .get_type_var(n)
+                .with_context(|| anyhow!("The typechecker is {self:#?}")),
         }
     }
 
@@ -406,7 +414,7 @@ impl TypeChecker {
 
                 return Ok(TypeExpr::ForallElim(fe));
             }
-            other => bail!("Expected type `{}` to have kind `{wanted_kind}` to be applied to type arguments, but instead it has kind `{}`", other, /*self.type_kind(&other)?*/ "cock"),
+            other => bail!("Expected type `{}` to have kind `{wanted_kind}` to be applied to type arguments, but instead it has kind `{}`", other, self.type_kind(&other)?),
         };
 
         let zipped: Vec<_> = args.into_iter().zip(f.vars.into_iter()).collect();
@@ -667,19 +675,22 @@ impl TypeChecker {
                     then: Box::new(base_type("...")),
                 });
                 match self.expr_type(*f.expr.clone())? {
-                    TypeExpr::Universal(forall) => self.elim_forall(ForallElim {
-                        expr: forall.then,
-                        args: f.args,
-                    }),
+                    TypeExpr::Universal(forall) => {
+                        self.push_block();
+                        for (var, kind) in &forall.vars {
+                            self.bind_typevar(var.clone(), kind.clone());
+                        }
+                        let res = self.elim_forall(ForallElim {
+                            expr: Box::new(TypeExpr::Forall(forall)),
+                            args: f.args,
+                        })?;
+                        self.pop_block();
+                        Ok(res)
+                    },
                     other => Err(anyhow!("Expected `{}` to have type `{wanted_t}`, but instead it has type `{other}`", *f.expr))
                 }
             }
             Expr::Forall(Forall { vars, then }) => {
-                let vars: Vec<(String, Kind)> = vars
-                    .into_iter()
-                    .map(|(name, _)| name)
-                    .zip(iter::repeat(Kind::Type))
-                    .collect();
                 self.push_block();
                 vars.iter()
                     .for_each(|(name, kind)| self.bind_typevar(name.clone(), kind.clone()));
@@ -883,8 +894,11 @@ impl TypeChecker {
         self.pop_block();
 
         let arg_type = actor.update.inp_type;
-        self.ensure_type(arg_type.clone())?;
         self.push_block();
+        for tvar in actor.update.t_vars {
+            self.bind_typevar(tvar, Kind::Type);
+        }
+        self.ensure_type(arg_type.clone())?;
         self.current_block_mut().return_type = state_type.clone();
         self.declare_var(actor.update.inp_name.clone(), arg_type)?;
         self.declare_var(actor.state.name.clone(), state_type.clone())?;

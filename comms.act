@@ -1,0 +1,56 @@
+type Comm = [msg, response]. {msg: msg, respond_to: Pid[response]};
+
+type Function = [msg, response]. Pid[Comm[msg, response]];
+
+type Show = [a]. Function[a, String];
+
+type Showable = [a]. {show: Show[a], val: a};
+
+type BoxedInt = {val: Int};
+
+actor main {
+	state u: Unit;
+	initialiser {
+		let showable_string = Showable[String] {show = show_string, val = "\nHello, world!\n"};
+		let showable_int = Showable[Int] {show = show_int, val = 10};
+		send(print_showable[Int], showable_int);
+		send(print_showable[String], showable_string);
+	}
+	update(t: Unit) {}
+}
+
+actor show_int {
+	state u: Unit;
+	initialiser {}
+	update(comm: Comm[Int, String]) {
+		let str = "";
+		intrinsic(int_to_string, comm.msg, str);
+		send(comm.respond_to, str);
+	}
+}
+
+actor show_string {
+	state u: Unit;
+	initialiser {}
+	update(comm: Comm[String, String]) {
+		send(comm.respond_to, comm.msg);
+	}
+}
+
+actor print_showable {
+	state u: Unit;
+	initialiser {}
+	update[a] (msg: Showable[a]) {
+		let shower = msg.show;
+		let to_shower = Comm[a, String] {msg = msg.val, respond_to = print_string};
+		send(shower, to_shower);
+	}
+}
+
+actor print_string {
+	state u: Unit;
+	initialiser {}
+	update(msg: String) {
+		intrinsic(print_string, msg);
+	}
+}

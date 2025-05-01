@@ -1,55 +1,24 @@
-type Id = [a]. a;
-
-type Apply1 = [f[_], a]. f[a];
-
-type Apply2 = [m[_[_], _], f[_], a]. m[f, a];
-
-type APid = [a]. Pid[a];
-
-type Num = Id[Int];
-
-type NumPid = Apply2[Apply1, APid, Num];
-
-type Person = [a]. {age: Int, name: String, gender: a};
-
-type Other = {age: Int, name: String, gender: String};
-
-actor print_person {
-	state u: Unit;
-
-	initialiser {}
-
-	update(person: Person[String]) {
-		intrinsic(print_string, "Person ");
-		intrinsic(print_string, person.name);
-		intrinsic(print_string, "\n");
-		intrinsic(print_string, "\tAge: ");
-		intrinsic(print_int, person.age);
-		intrinsic(print_string, "\tGender: ");
-		intrinsic(print_string, person.gender);
-		intrinsic(print_string, "\n");
-	}
-}
-
 actor summing {
-	state sum: Num;
+	state sum: Int;
 
 	initialiser {
-		let self: NumPid = summing;
-		let me: Person[String] = Other {age = 18, name = "Robert", gender = "boy"};
-		send(print_person, me);
-
+		let self: Pid[Int] = summing;
 		send(self, 10000);
 		return 0;
 	}
 
-	update (num: Num) {
+	update (num: Int) {
 		if (num <= 0) {
 			intrinsic(print_int, sum);
 			return sum;
 		};
 		let minused = num - 1;
+
+		# Describing the next planned input for itself
 		send(summing, minused);
+
+		# Computing its state (referenced by the variable `sum`) that will be used in the next scheduling cycle along
+		# with the next message that it just sent 
 		return num + sum;
 	}
 }

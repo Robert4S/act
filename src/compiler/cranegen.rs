@@ -82,7 +82,7 @@ fn declare_variable(
 ) -> Variable {
     let var = Variable::new(*index);
     if !variables.contains_key(name) {
-        variables.insert(name.into(), var);
+        variables.insert(format!("{name}"), var);
         builder.declare_var(var, int);
         *index += 1;
     }
@@ -157,7 +157,7 @@ impl Compiler {
             self.globals.insert(name.clone());
             let pid_slot = self
                 .module
-                .declare_data(name, Linkage::Export, true, false)
+                .declare_data(&format!("act__{name}"), Linkage::Export, true, false)
                 .unwrap();
             self.data_description.define_zeroinit(8);
             self.data_description.set_align(8);
@@ -759,7 +759,7 @@ impl<'a> FunctionTranslator<'a> {
     }
 
     fn translate_symbol(&mut self, name: String) -> Value {
-        if self.vars.contains_key(&name) {
+        if self.vars.contains_key(&format!("{name}")) {
             let var = self
                 .vars
                 .get(&name)
@@ -790,13 +790,7 @@ impl<'a> FunctionTranslator<'a> {
         let local_id = self.module.declare_data_in_func(id, self.builder.func);
         let ptr = self.builder.ins().symbol_value(self.int, local_id);
 
-        let args = vec![
-            (
-                self.translate_expr(Expr::Symbol(String::from("RUNTIME"))),
-                self.int,
-            ),
-            (ptr, self.int),
-        ];
+        let args = vec![self.get_runtime(), (ptr, self.int)];
 
         let name = String::from("make_gc_string");
 
@@ -855,7 +849,7 @@ impl<'a> FunctionTranslator<'a> {
     fn translate_global_data_addr(&mut self, name: String) -> Value {
         let sym = self
             .module
-            .declare_data(&name, Linkage::Export, true, false)
+            .declare_data(&format!("act__{name}"), Linkage::Export, true, false)
             .expect("problem declaring data object");
 
         let local_id = self.module.declare_data_in_func(sym, self.builder.func);

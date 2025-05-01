@@ -1,0 +1,42 @@
+type Id = [a]. a;
+
+type Apply1 = [f[_], a]. f[a];
+
+type Apply2 = [m[_[_], _], f[_], a]. m[f, a];
+
+type APid = [a]. Pid[a];
+
+type Num = Id[Int];
+
+type NumPid = Apply2[Apply1, APid, Num];
+
+type Person = [a]. {age: Int, name: String, gender: a};
+
+type Other = {age: Int, name: String, gender: String};
+
+actor print_person {
+	state u: Unit;
+
+	initialiser {}
+
+	update(person: Person[String]) {
+		intrinsic(print_string, "Person ");
+		intrinsic(print_string, person.name);
+		intrinsic(print_string, "\n");
+		intrinsic(print_string, "\tAge: ");
+		intrinsic(print_int, person.age);
+		intrinsic(print_string, "\tGender: ");
+		intrinsic(print_string, person.gender);
+		intrinsic(print_string, "\n");
+	}
+}
+
+actor typing {
+	state u: Unit;
+
+	initialiser {
+		let me: Person[String] = Person[String] {age = 18, name = "Robert", gender = "boy"};
+		send(print_person, me);
+	}
+	update(t: Unit) {}
+}
