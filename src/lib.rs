@@ -13,6 +13,7 @@ pub fn add(left: u64, right: u64) -> u64 {
 }
 
 mod runtimelib;
+mod screen;
 
 use runtimelib::{
     gc::{self, mask_integer, unmask_integer, HeaderTag},
@@ -165,7 +166,7 @@ pub extern "C" fn send_actor(runtime: &RT, actor: Gc, value: Gc) {
 #[no_mangle]
 pub extern "C" fn start_runtime() {
     RT.init_actors();
-    RT::supervise(RT.clone());
+    rayon::scope(|_| RT::supervise(RT.clone()));
 }
 
 #[no_mangle]
@@ -191,8 +192,8 @@ pub unsafe extern "C" fn print_float(_rt: &RT, number: Gc) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn eval_int_div(_rt: &RT, left: i64, right: i64) -> Gc {
-    let res = left / right;
+pub unsafe extern "C" fn eval_int_div(_rt: &RT, left: Gc, right: Gc) -> Gc {
+    let res = unmask_integer(left) / unmask_integer(right);
     mask_integer(res)
 }
 

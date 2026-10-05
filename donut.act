@@ -1,0 +1,316 @@
+# donut.act — a spinning torus, rendered by a six-stage actor pipeline whose topology is
+# checked at the type level.
+#
+#   donut ──▶ sweep ──▶ pitch ──▶ roll ──▶ lens ──▶ shade ──▶ raster
+#     ▲                                                          │
+#     └──────────────────────────── ack ─────────────────────────┘
+#
+# Every message carries the remainder of its own journey. Stages never know who comes next:
+# each is polymorphic in the rest of the route, so the only thing that can wire them up is a
+# route whose type lines up hop by hop.
+
+# ── Payloads ──────────────────────────────────────────────────────────────────────────────
+
+type V3 = {x: Float, y: Float, z: Float};
+type View = {cx: Float, cy: Float, k1: Float, grain: Float};
+type Pose = {ca: Float, sa: Float, cb: Float, sb: Float, view: View, frame: Int, total: Int, last: Bool};
+
+type Param = {ct: Float, st: Float, cp: Float, sp: Float, pose: Pose};
+type Surf = {p: V3, n: V3, pose: Pose};
+type Frag = {sx: Float, sy: Float, ooz: Float, size: Float, n: V3, pose: Pose};
+type Lit = {sx: Float, sy: Float, ooz: Float, size: Float, lum: Float, face: Float, pose: Pose};
+
+# ── Typed routing ─────────────────────────────────────────────────────────────────────────
+
+# A message: a payload, plus the continuation it must be delivered along.
+type Hop = [a, k]. {val: a, k: k};
+
+# One step of a route: an actor accepting an `b` (and the rest, `j`), followed by `j`.
+type To = [b, j]. {pid: Pid[Hop[b, j]], next: j};
+
+# The end of every route: where to return the pipeline credit.
+type Done = {ack: Pid[Int]};
+
+# An arrow from `i` to `o` that works for *any* downstream route.
+type Stage = [i, o]. for ['rest]. Pid[Hop[i, To[o, 'rest]]];
+
+# A right fold of a binary type constructor over six payload types.
+type Chain6 = [f[_, _], a, b, c, d, e, g, k]. f[a, f[b, f[c, f[d, f[e, f[g, k]]]]]];
+
+# Apply a unary constructor twice.
+type Twice = [f[_], a]. f[f[a]];
+type ThroughSurf = [k]. To[Surf, k];
+
+# The concrete route, spelled out backwards from the sink.
+type ToRaster = To[Lit, Done];
+type ToShade = To[Frag, ToRaster];
+type ToLens = To[Surf, ToShade];
+type ToRoll = Twice[ThroughSurf, ToShade];
+type ToPitch = To[Surf, ToRoll];
+type Route = To[Param, ToPitch];
+
+# ── Driver ────────────────────────────────────────────────────────────────────────────────
+
+type Cursor = {i: Int, j: Int, ct: Float, st: Float, cp: Float, sp: Float};
+type Plan = {rings: Int, sides: Int, limit: Int, ct: Float, st: Float, cp: Float, sp: Float, ca: Float, sa: Float, cb: Float, sb: Float};
+type Drv = {cur: Cursor, pose: Pose, route: Route, plan: Plan};
+
+actor donut {
+	state d: Drv;
+
+	initialiser {
+		let w = 0.0;
+		let h = 0.0;
+		intrinsic(screen_open, w, h);
+
+		# Resolution of the surface sweep and the number of frames (0 = run until ctrl-c).
+		let rings = 64;
+		let sides = 160;
+		let limit = 0;
+
+		# cos/sin of each angular step, by Taylor series: there is no trig in act.
+		let tau = 6.283185307179586;
+		let dt = tau /. 64.0;
+		let dp = tau /. 160.0;
+		let da = 0.045;
+		let db = 0.019;
+
+		let t2 = dt *. dt;
+		let p2 = dp *. dp;
+		let a2 = da *. da;
+		let b2 = db *. db;
+		let plan = Plan {
+			rings = rings, sides = sides, limit = limit,
+			ct = 1.0 -. (t2 *. (0.5 -. (t2 *. (0.041666666666666664 -. (t2 *. 0.001388888888888889))))),
+			st = dt *. (1.0 -. (t2 *. (0.16666666666666666 -. (t2 *. (0.008333333333333333 -. (t2 *. 0.0001984126984126984)))))),
+			cp = 1.0 -. (p2 *. (0.5 -. (p2 *. (0.041666666666666664 -. (p2 *. 0.001388888888888889))))),
+			sp = dp *. (1.0 -. (p2 *. (0.16666666666666666 -. (p2 *. (0.008333333333333333 -. (p2 *. 0.0001984126984126984)))))),
+			ca = 1.0 -. (a2 *. (0.5 -. (a2 *. 0.041666666666666664))),
+			sa = da *. (1.0 -. (a2 *. (0.16666666666666666 -. (a2 *. 0.008333333333333333)))),
+			cb = 1.0 -. (b2 *. (0.5 -. (b2 *. 0.041666666666666664))),
+			sb = db *. (1.0 -. (b2 *. (0.16666666666666666 -. (b2 *. 0.008333333333333333))))
+		};
+
+		# Each stage, ascribed its arrow type. These only typecheck if the actor really is
+		# `i -> o` for every possible continuation.
+		let s_sweep: Stage[Param, Surf] = sweep;
+		let s_pitch: Stage[Surf, Surf] = pitch;
+		let s_roll: Stage[Surf, Surf] = roll;
+		let s_lens: Stage[Surf, Frag] = lens;
+		let s_shade: Stage[Frag, Lit] = shade;
+
+		# Wire the route from the sink backwards, instantiating each stage at exactly the
+		# continuation that follows its successor.
+		let to_raster: ToRaster = To[Lit, Done] {pid = raster, next = Done {ack = donut}};
+		let to_shade: ToShade = To[Frag, ToRaster] {pid = s_shade[Done], next = to_raster};
+		let to_lens: ToLens = To[Surf, ToShade] {pid = s_lens[ToRaster], next = to_shade};
+		let to_roll: ToRoll = To[Surf, ToLens] {pid = s_roll[ToShade], next = to_lens};
+		let to_pitch: ToPitch = To[Surf, ToRoll] {pid = s_pitch[ToLens], next = to_roll};
+		let route: Route = To[Param, ToPitch] {pid = s_sweep[ToRoll], next = to_pitch};
+
+		# The hand-built route and the folded one are the same type.
+		let proof: Chain6[To, Param, Surf, Surf, Surf, Frag, Lit, Done] = route;
+
+		# Pipeline credits: this many samples may be in flight at once.
+		send(donut, 1);
+		send(donut, 1);
+		send(donut, 1);
+		send(donut, 1);
+		send(donut, 1);
+		send(donut, 1);
+		send(donut, 1);
+		send(donut, 1);
+		send(donut, 1);
+		send(donut, 1);
+
+		return Drv {
+			cur = Cursor {i = 0, j = 0, ct = 1.0, st = 0.0, cp = 1.0, sp = 0.0},
+			pose = Pose {
+				ca = 1.0, sa = 0.0, cb = 1.0, sb = 0.0,
+				view = View {cx = w *. 0.5, cy = h *. 0.5, k1 = h *. 0.56, grain = 3.0 *. dp},
+				frame = 0, total = rings * sides, last = false
+			},
+			route = proof,
+			plan = plan
+		};
+	}
+
+	# One credit in, one sample out.
+	update (credit: Int) {
+		let c = d.cur;
+		let pose = d.pose;
+		let plan = d.plan;
+
+		if ((plan.limit > 0) && (pose.frame >= plan.limit)) {
+			return d;
+		};
+
+		let param = Param {ct = c.ct, st = c.st, cp = c.cp, sp = c.sp, pose = pose};
+		send(d.route.pid, Hop[Param, ToPitch] {val = param, k = d.route.next});
+
+		# Next point around the tube.
+		let j = c.j + 1;
+		if (j < plan.sides) {
+			return Drv {
+				cur = Cursor {
+					i = c.i, j = j, ct = c.ct, st = c.st,
+					cp = (c.cp *. plan.cp) -. (c.sp *. plan.sp),
+					sp = (c.sp *. plan.cp) +. (c.cp *. plan.sp)
+				},
+				pose = pose, route = d.route, plan = plan
+			};
+		};
+
+		# Next ring around the hole.
+		let i = c.i + 1;
+		if (i < plan.rings) {
+			return Drv {
+				cur = Cursor {
+					i = i, j = 0, cp = 1.0, sp = 0.0,
+					ct = (c.ct *. plan.ct) -. (c.st *. plan.st),
+					st = (c.st *. plan.ct) +. (c.ct *. plan.st)
+				},
+				pose = pose, route = d.route, plan = plan
+			};
+		};
+
+		# Next frame: advance both rotations, then pull them back onto the unit circle with
+		# one Newton step so they never drift.
+		let ca = (pose.ca *. plan.ca) -. (pose.sa *. plan.sa);
+		let sa = (pose.sa *. plan.ca) +. (pose.ca *. plan.sa);
+		let cb = (pose.cb *. plan.cb) -. (pose.sb *. plan.sb);
+		let sb = (pose.sb *. plan.cb) +. (pose.cb *. plan.sb);
+		let ka = (3.0 -. ((ca *. ca) +. (sa *. sa))) *. 0.5;
+		let kb = (3.0 -. ((cb *. cb) +. (sb *. sb))) *. 0.5;
+		let frame = pose.frame + 1;
+
+		return Drv {
+			cur = Cursor {i = 0, j = 0, ct = 1.0, st = 0.0, cp = 1.0, sp = 0.0},
+			pose = Pose {
+				ca = ca *. ka, sa = sa *. ka, cb = cb *. kb, sb = sb *. kb,
+				view = pose.view, frame = frame, total = pose.total,
+				last = (plan.limit > 0) && ((frame + 1) == plan.limit)
+			},
+			route = d.route, plan = plan
+		};
+	}
+}
+
+# ── Stages ────────────────────────────────────────────────────────────────────────────────
+
+# (θ, φ) on the parameter square -> point and normal on the torus (tube radius 1, hole 2).
+actor sweep {
+	state u: Unit;
+	initialiser {}
+	update['rest] (h: Hop[Param, To[Surf, 'rest]]) {
+		let q = h.val;
+		let ring = 2.0 +. q.ct;
+		let p = V3 {x = ring *. q.cp, y = q.st, z = ring *. q.sp};
+		let n = V3 {x = q.ct *. q.cp, y = q.st, z = q.ct *. q.sp};
+		send(h.k.pid, Hop[Surf, 'rest] {val = Surf {p = p, n = n, pose = q.pose}, k = h.k.next});
+	}
+}
+
+# Rotate about the x axis by A.
+actor pitch {
+	state u: Unit;
+	initialiser {}
+	update['rest] (h: Hop[Surf, To[Surf, 'rest]]) {
+		let s = h.val;
+		let c = s.pose.ca;
+		let n = s.pose.sa;
+		let p = V3 {x = s.p.x, y = (s.p.y *. c) -. (s.p.z *. n), z = (s.p.y *. n) +. (s.p.z *. c)};
+		let m = V3 {x = s.n.x, y = (s.n.y *. c) -. (s.n.z *. n), z = (s.n.y *. n) +. (s.n.z *. c)};
+		send(h.k.pid, Hop[Surf, 'rest] {val = Surf {p = p, n = m, pose = s.pose}, k = h.k.next});
+	}
+}
+
+# Rotate about the z axis by B.
+actor roll {
+	state u: Unit;
+	initialiser {}
+	update['rest] (h: Hop[Surf, To[Surf, 'rest]]) {
+		let s = h.val;
+		let c = s.pose.cb;
+		let n = s.pose.sb;
+		let p = V3 {x = (s.p.x *. c) -. (s.p.y *. n), y = (s.p.x *. n) +. (s.p.y *. c), z = s.p.z};
+		let m = V3 {x = (s.n.x *. c) -. (s.n.y *. n), y = (s.n.x *. n) +. (s.n.y *. c), z = s.n.z};
+		send(h.k.pid, Hop[Surf, 'rest] {val = Surf {p = p, n = m, pose = s.pose}, k = h.k.next});
+	}
+}
+
+# Perspective projection onto the screen. `size` is how far apart neighbouring samples land,
+# so the rasteriser can splat just enough to close the gaps.
+actor lens {
+	state u: Unit;
+	initialiser {}
+	update['rest] (h: Hop[Surf, To[Frag, 'rest]]) {
+		let s = h.val;
+		let v = s.pose.view;
+		let ooz = 1.0 /. (5.0 +. s.p.z);
+		let k = v.k1 *. ooz;
+		let frag = Frag {
+			sx = v.cx +. (k *. s.p.x), sy = v.cy -. (k *. s.p.y),
+			ooz = ooz, size = k *. v.grain, n = s.n, pose = s.pose
+		};
+		send(h.k.pid, Hop[Frag, 'rest] {val = frag, k = h.k.next});
+	}
+}
+
+# Lambert term against a key light up and to the left of the camera.
+actor shade {
+	state u: Unit;
+	initialiser {}
+	update['rest] (h: Hop[Frag, To[Lit, 'rest]]) {
+		let f = h.val;
+		let n = f.n;
+		let lum = ((n.x *. -0.447) +. (n.y *. 0.716)) +. (n.z *. -0.537);
+		let lit = Lit {sx = f.sx, sy = f.sy, ooz = f.ooz, size = f.size, lum = lum, face = n.z, pose = f.pose};
+		send(h.k.pid, Hop[Lit, 'rest] {val = lit, k = h.k.next});
+	}
+}
+
+# ── Sink ──────────────────────────────────────────────────────────────────────────────────
+
+# Samples arrive in no particular order (and may straddle two frames), so plot into the
+# buffer for the sample's frame parity and present once that frame's count is complete.
+type Tally = {even: Int, odd: Int};
+
+actor raster {
+	state tally: Tally;
+
+	initialiser {
+		return Tally {even = 0, odd = 0};
+	}
+
+	update (h: Hop[Lit, Done]) {
+		let f = h.val;
+		let pose = f.pose;
+		let parity = pose.frame % 2;
+		intrinsic(screen_brush, f.size, f.face);
+		intrinsic(screen_plot, parity, f.sx, f.sy, f.ooz, f.lum);
+		send(h.k.ack, 1);
+
+		if (parity == 0) {
+			let seen = tally.even + 1;
+			if (seen == pose.total) {
+				intrinsic(screen_present, parity, pose.frame);
+				if (pose.last) {
+					intrinsic(screen_close, 0);
+				};
+				return Tally {even = 0, odd = tally.odd};
+			};
+			return Tally {even = seen, odd = tally.odd};
+		};
+
+		let seen = tally.odd + 1;
+		if (seen == pose.total) {
+			intrinsic(screen_present, parity, pose.frame);
+			if (pose.last) {
+				intrinsic(screen_close, 0);
+			};
+			return Tally {even = tally.even, odd = 0};
+		};
+		return Tally {even = tally.even, odd = seen};
+	}
+}
