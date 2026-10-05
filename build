@@ -1,4 +1,13 @@
 #!/bin/sh
-cargo build
-cp ./target/debug/act $HOME/.local/bin
-cp ./target/debug/libact.a $HOME/.local/lib
+# Usage: ./build [release]
+set -e
+if [ "$1" = "release" ]; then
+	cargo build --release
+	profile=release
+else
+	cargo build
+	profile=debug
+fi
+mkdir -p $HOME/.local/bin $HOME/.local/lib
+cp ./target/$profile/act $HOME/.local/bin
+cp ./target/$profile/libact.a $HOME/.local/lib

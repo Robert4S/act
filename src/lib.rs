@@ -13,6 +13,7 @@ pub fn add(left: u64, right: u64) -> u64 {
 }
 
 mod runtimelib;
+mod screen;
 
 use runtimelib::{
     gc::{self, mask_integer, unmask_integer, HeaderTag},
