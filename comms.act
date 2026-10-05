@@ -1,3 +1,5 @@
+type Pair = [a, b]. {a: a, b: b};
+
 type Comm = [msg, response]. {msg: msg, respond_to: Pid[response]};
 
 type Function = [msg, response]. Pid[Comm[msg, response]];
@@ -5,8 +7,6 @@ type Function = [msg, response]. Pid[Comm[msg, response]];
 type Show = [a]. Function[a, String];
 
 type Showable = [a]. {show: Show[a], val: a};
-
-type BoxedInt = {val: Int};
 
 actor main {
 	state u: Unit;

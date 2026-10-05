@@ -8,7 +8,7 @@ use std::{
 
 use crate::tokenise::{InfixToken, Token, TokenKind};
 
-use super::typecheck;
+use super::typecheck::{self, Kind};
 
 macro_rules! consume {
     ($tokens:ident, $p:pat, $err:expr) => {
@@ -313,6 +313,10 @@ pub enum Expr {
         offset: Rc<RefCell<usize>>,
         fieldname: String,
     },
+    //Choose {
+    //    exist: Vec<(String, Kind, TypeExpr)>,
+    //    body: Box<Expr>,
+    //},
 }
 
 impl Display for Expr {
@@ -349,6 +353,18 @@ impl Display for Expr {
                 offset: _,
                 fieldname,
             } => write!(f, "{from}.{fieldname}"),
+            //Expr::Choose { exist, body } => {
+            //    write!(
+            //        f,
+            //        "choose {{{}:{} = {}",
+            //        &exist[0].0, &exist[0].1, &exist[0].2
+            //    )?;
+            //    for (name, kind, val) in &exist[1..] {
+            //        write!(f, ", {}:{} = {}", name, kind, val)?;
+            //    }
+            //    write!(f, "}}. {}", body.as_ref())
+            //}
+            //Expr::Unpack(expr) => write!(f, "unpack({})", expr.as_ref()),
         }
     }
 }
@@ -368,6 +384,88 @@ fn parse_forall<T: ForallT>(
         },
         rest,
     ))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Existential<T> {
+    pub vars: Vec<(String, Kind)>,
+    pub then: T,
+}
+
+trait PatTy {
+    type Ty;
+}
+
+impl<'a, T: PatTy> PatTy for Pattern<'a, T> {
+    type Ty = &'a str;
+}
+
+impl<'a> PatTy for Expr {
+    type Ty = Self;
+}
+
+enum Pattern<'a, T: PatTy> {
+    Constructor(Rc<DataConstructor<'a, T>>),
+    Tuple(Vec<Pattern<'a, T>>),
+    Base(T::Ty),
+}
+
+struct DataConstructor<'a, T: PatTy> {
+    identifier: &'a str,
+    body: DataConstructorInner<'a, T>,
+}
+
+enum DataConstructorInner<'a, T: PatTy> {
+    Record(Vec<(String, Pattern<'a, T>)>),
+    Regular(Pattern<'a, T>),
+}
+
+fn parse_existential_body<T>(
+    tokens: &[Token],
+    parse_t: impl Fn(&[Token]) -> Result<(T, &[Token])>,
+) -> Result<(Existential<T>, &[Token])> {
+    consume!(tokens, rest, TokenKind::Lsquare, TokenKind::Lsquare);
+
+    let (vars, rest) = parse_existential_tail(rest)?;
+    let (then, rest) = parse_t(rest)?;
+    Ok((Existential { vars, then }, rest))
+}
+
+fn parse_existential_tail(tokens: &[Token]) -> Result<(Vec<(String, Kind)>, &[Token])> {
+    let (first, tokens) = parse_existential_var(tokens)?;
+    let mut vars = vec![first];
+    let mut tokens = tokens;
+    while !matches!(tokens, [(TokenKind::Rsquare, _), ..]) {
+        consume!(tokens, rest, TokenKind::Comma, TokenKind::Comma);
+        let (e, rest) = parse_existential_var(rest)?;
+
+        tokens = rest;
+        vars.push(e);
+    }
+
+    consume!(tokens, TokenKind::Rsquare, TokenKind::Rsquare);
+    consume!(tokens, TokenKind::Dot, TokenKind::Dot);
+
+    Ok((vars, tokens))
+}
+
+fn parse_existential_var(tokens: &[Token]) -> Result<((String, Kind), &[Token])> {
+    consume!(
+        tokens,
+        TokenKind::TypeName(name),
+        TokenKind::TypeName("_".to_string())
+    );
+    match tokens {
+        [(TokenKind::Lsquare, _), rest @ ..] => {
+            let (args, rest) = parse_hkt_typevar_tail(rest)?;
+            let kind = typecheck::Kind::Function {
+                args,
+                output: Box::new(typecheck::Kind::Type),
+            };
+            Ok(((name.clone(), kind), rest))
+        }
+        other => Ok(((name.clone(), typecheck::Kind::Type), other)),
+    }
 }
 
 fn parse_forall_tail<T: ForallT>(tokens: &[Token]) -> Result<(Vec<(String, T::Kind)>, &[Token])> {
@@ -537,6 +635,14 @@ fn parse_universal(tokens: &[Token]) -> Option<(TypeExpr, &[Token])> {
     let (body, rest) = parse_forall(rest, parse_type_expr).ok()?;
 
     Some((TypeExpr::Universal(body), rest))
+}
+
+fn parse_existential(tokens: &[Token]) -> Option<(TypeExpr, &[Token])> {
+    let (_, rest) = consume!(tokens, TokenKind::Exists)?;
+    let (body, rest) = parse_existential_body(rest, parse_type_expr).ok()?;
+
+    todo!();
+    //Some((TypeExpr::Existential(body), rest))
 }
 
 fn parse_base_type(tokens: &[Token]) -> Option<(TypeExpr, &[Token])> {

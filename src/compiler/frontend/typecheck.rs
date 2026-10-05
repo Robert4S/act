@@ -6,7 +6,7 @@ use super::{
 };
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt::Display,
     iter,
     rc::Rc,
@@ -25,12 +25,27 @@ enum Nominal {
 }
 
 #[derive(Debug)]
+struct Constructor {
+    /// if
+    /// `type A[a] = S[a]: a -> A[a]`
+    /// then the constructor S has variables [a], takes in a value of type `a` and applies [a] to the type it belongs to
+    creates: usize,
+    applies: Vec<String>,
+    vars: Vec<(String, Kind)>,
+    takes: TypeExpr,
+}
+
+type TypeID = usize;
+type ConstructorID = usize;
+
+#[derive(Debug)]
 pub struct TypeChecker {
     globals: HashMap<String, TypeExpr>,
     blocks: Vec<Block>,
-    aliases: HashMap<String, Nominal>,
-    idx: usize,
-    records: HashMap<usize, RecordType>,
+    constructors: Vec<Constructor>,
+    constructor_names: HashMap<String, ConstructorID>,
+    variant_constrs: HashMap<TypeID, BTreeSet<ConstructorID>>,
+    records: HashMap<TypeID, RecordType>,
 }
 
 impl TypeChecker {
@@ -55,10 +70,12 @@ impl TypeChecker {
         let mut s = Self {
             globals,
             blocks: Vec::new(),
-            aliases: intrinsics,
             idx,
             records: HashMap::new(),
+            constructors: HashMap::new(),
         };
+        s.push_block();
+        s.current_block_mut().aliases = intrinsics;
 
         for (name, t) in aliases {
             match t {
@@ -80,10 +97,12 @@ impl TypeChecker {
         }
 
         // TODO: Validate aliases after all have been declared
-        for (name, nominal) in s.aliases.clone() {
+        for (name, nominal) in s.current_block().aliases.clone() {
             if let Nominal::Transparent(id, t) = nominal {
                 let simplified = s.simplify(t).unwrap();
-                s.aliases.insert(name, Nominal::Transparent(id, simplified));
+                s.current_block_mut()
+                    .aliases
+                    .insert(name, Nominal::Transparent(id, simplified));
             }
         }
         s
@@ -91,22 +110,39 @@ impl TypeChecker {
 
     fn declare_record(&mut self, name: String, vars: Vec<(String, Kind)>, r: RecordType) -> usize {
         let rc = r.clone();
-        let id = self.declare_opaque(name, vars);
+        let id = self.declare_opaque(name.clone(), vars.clone());
+        let creates = if vars.len() == 0 {
+            TypeExpr::Base(name)
+        } else {
+            TypeExpr::ForallElim(ForallElim {
+                expr: Box::new(TypeExpr::Base(name)),
+                args: vars
+                    .iter()
+                    .map(|(name, _)| TypeExpr::TypeVar(name.clone()))
+                    .collect(),
+            })
+        };
         self.records.insert(id, rc);
 
         id
     }
 
     fn declare_opaque(&mut self, name: String, vars: Vec<(String, Kind)>) -> usize {
-        self.aliases.insert(name, Nominal::Opaque(self.idx, vars));
+        let idx = self.idx;
+        self.current_block_mut()
+            .aliases
+            .insert(name, Nominal::Opaque(idx, vars));
         self.idx += 1;
-        self.idx - 1
+        idx
     }
 
     fn declare_structural(&mut self, name: String, t: TypeExpr) -> usize {
-        self.aliases.insert(name, Nominal::Transparent(self.idx, t));
+        let idx = self.idx;
+        self.current_block_mut()
+            .aliases
+            .insert(name, Nominal::Transparent(idx, t));
         self.idx += 1;
-        self.idx - 1
+        idx
     }
 
     fn actor_type(updater: Update) -> TypeExpr {
@@ -214,7 +250,8 @@ fn base_type(name: &str) -> TypeExpr {
 
 impl TypeChecker {
     fn get_alias(&self, name: &str) -> Result<&Nominal> {
-        self.aliases
+        self.current_block()
+            .aliases
             .get(name)
             .with_context(|| format!("Unknown type: `{name}`"))
     }
@@ -387,23 +424,26 @@ impl TypeChecker {
         let args: Result<Vec<TypeExpr>> =
             fe.args.iter().map(|a| self.simplify(a.clone())).collect();
         let args = args?;
+
         let kinds: Vec<(TypeExpr, Kind)> = fe
             .args
             .iter()
             .map(|arg| Ok((arg.clone(), self.type_kind(arg)?)))
             .collect::<Result<_>>()?;
-        let wanted_kind = Kind::Function {
-            args: kinds.iter().map(|(_, k)| k.clone()).collect(),
-            output: Box::new(Kind::Type),
-        };
 
         let f = match self.simplify(fe.expr.as_ref().clone())? {
-            TypeExpr::Forall(f) => f,
+            TypeExpr::Forall(f) => {
+                self.push_block();
+                for (name, kind) in &f.vars {
+                    self.bind_typevar(name.clone(), kind.clone());
+                }
+                f
+            }
             TypeExpr::Base(name) => {
                 let Kind::Function { args, output: _ } =
                     self.type_kind(&TypeExpr::Base(name.clone()))?
                 else {
-                    bail!("Type `{name}` was expected to have kind `{wanted_kind}`, but instead has kind `*`");
+                    bail!("Type `{name}` is not a type constructor");
                 };
 
                 for ((have, have_kind), want_kind) in kinds.into_iter().zip(args) {
@@ -414,7 +454,7 @@ impl TypeChecker {
 
                 return Ok(TypeExpr::ForallElim(fe));
             }
-            other => bail!("Expected type `{}` to have kind `{wanted_kind}` to be applied to type arguments, but instead it has kind `{}`", other, self.type_kind(&other)?),
+            other => bail!("Expected type `{}` to be a type constructor", other),
         };
 
         let zipped: Vec<_> = args.into_iter().zip(f.vars.into_iter()).collect();
@@ -428,13 +468,14 @@ impl TypeChecker {
         }
         let t = self.simplify(subbed)?;
         self.ensure_type(t.clone())?;
+        self.pop_block();
         Ok(t)
     }
 
     fn simplify(&mut self, type_: TypeExpr) -> Result<TypeExpr> {
         match type_ {
             TypeExpr::Base(name) => {
-                if let Some(e) = self.aliases.get(&name) {
+                if let Some(e) = self.current_block().aliases.get(&name) {
                     match e {
                         Nominal::Transparent(_, t) => self.simplify(t.clone()),
                         Nominal::Opaque(_, _) => Ok(TypeExpr::Base(name)),
@@ -455,7 +496,10 @@ impl TypeChecker {
                                 .args
                                 .iter()
                                 .cloned()
-                                .map(|a| self.type_kind(&a))
+                                .map(|a| {
+                                    self.type_kind(&a)
+                                        .with_context(|| anyhow!("For opaque type {n}"))
+                                })
                                 .collect();
 
                             let given = given?;
@@ -492,10 +536,12 @@ impl TypeChecker {
         match (&have_s, &want_s) {
             (TypeExpr::Base(h), TypeExpr::Base(w)) => {
                 let h = self
+                    .current_block()
                     .aliases
                     .get(h)
                     .with_context(|| anyhow!("Unknown type `{h}`"))?;
                 let w = self
+                    .current_block()
                     .aliases
                     .get(w)
                     .with_context(|| anyhow!("Unknown type `{w}`"))?;
@@ -658,104 +704,104 @@ impl TypeChecker {
             Expr::String(_) => Ok(base_type("String")),
             Expr::Symbol(s) => self.var_type(&s).cloned(),
             Expr::Infix {
-                left,
-                op,
-                right,
-                eq_typename_buf,
-            } => {
-                let left_t = self.expr_type(*left.clone())?;
-                let right_t = self.expr_type(*right.clone())?;
-                self.infix_type(&left_t, &right_t, op, eq_typename_buf, *left, *right)
-            }
+                        left,
+                        op,
+                        right,
+                        eq_typename_buf,
+                    } => {
+                        let left_t = self.expr_type(*left.clone())?;
+                        let right_t = self.expr_type(*right.clone())?;
+                        self.infix_type(&left_t, &right_t, op, eq_typename_buf, *left, *right)
+                    }
             Expr::ForallElim(f) => {
-                let wanted_t = TypeExpr::Universal(Forall {
-                    vars: (0..(f.args.len()))
-                        .map(|n| (format!("a{n}"), Kind::Type))
-                        .collect(),
-                    then: Box::new(base_type("...")),
-                });
-                match self.expr_type(*f.expr.clone())? {
-                    TypeExpr::Universal(forall) => {
-                        self.push_block();
-                        for (var, kind) in &forall.vars {
-                            self.bind_typevar(var.clone(), kind.clone());
+                        let wanted_t = TypeExpr::Universal(Forall {
+                            vars: (0..(f.args.len()))
+                                .map(|n| (format!("a{n}"), Kind::Type))
+                                .collect(),
+                            then: Box::new(base_type("...")),
+                        });
+                        match self.expr_type(*f.expr.clone())? {
+                            TypeExpr::Universal(forall) => {
+                                self.push_block();
+                                for (var, kind) in &forall.vars {
+                                    self.bind_typevar(var.clone(), kind.clone());
+                                }
+                                let res = self.elim_forall(ForallElim {
+                                    expr: Box::new(TypeExpr::Forall(forall)),
+                                    args: f.args,
+                                })?;
+                                self.pop_block();
+                                Ok(res)
+                            },
+                            other => Err(anyhow!("Expected `{}` to have type `{wanted_t}`, but instead it has type `{other}`", *f.expr))
                         }
-                        let res = self.elim_forall(ForallElim {
-                            expr: Box::new(TypeExpr::Forall(forall)),
-                            args: f.args,
-                        })?;
-                        self.pop_block();
-                        Ok(res)
-                    },
-                    other => Err(anyhow!("Expected `{}` to have type `{wanted_t}`, but instead it has type `{other}`", *f.expr))
-                }
-            }
+                    }
             Expr::Forall(Forall { vars, then }) => {
-                self.push_block();
-                vars.iter()
-                    .for_each(|(name, kind)| self.bind_typevar(name.clone(), kind.clone()));
-                let then_type = self.expr_type(*then)?;
-                self.pop_block();
-                Ok(TypeExpr::Universal(Forall {
-                    vars,
-                    then: Box::new(then_type),
-                }))
-            }
+                        self.push_block();
+                        vars.iter()
+                            .for_each(|(name, kind)| self.bind_typevar(name.clone(), kind.clone()));
+                        let then_type = self.expr_type(*then)?;
+                        self.pop_block();
+                        Ok(TypeExpr::Universal(Forall {
+                            vars,
+                            then: Box::new(then_type),
+                        }))
+                    }
             Expr::Record(re) => {
-                let r = self.extract_record(re.t.clone(), Expr::Record(re.clone()))?;
-                *re.actual.borrow_mut() = Some(r.clone());
-                let rec_type_fields: Result<Vec<_>> = re
-                    .fields
-                    .iter()
-                    .map(|(name, e)| {
-                        Ok((
-                            name,
-                            e,
-                            &r.fields
-                                .get(name)
-                                .with_context(|| anyhow!("Type `{}` does not have field {name}", re.t.clone()))?
-                                .1,
-                        ))
-                    })
-                    .collect();
+                        let r = self.extract_record(re.t.clone(), Expr::Record(re.clone()))?;
+                        *re.actual.borrow_mut() = Some(r.clone());
+                        let rec_type_fields: Result<Vec<_>> = re
+                            .fields
+                            .iter()
+                            .map(|(name, e)| {
+                                Ok((
+                                    name,
+                                    e,
+                                    &r.fields
+                                        .get(name)
+                                        .with_context(|| anyhow!("Type `{}` does not have field {name}", re.t.clone()))?
+                                        .1,
+                                ))
+                            })
+                            .collect();
 
-                let t: Result<()> = r
-                    .fields
-                    .keys()
-                    .map(|f| {
-                        if !re.fields.contains_key(f) {
-                            Err(anyhow!("Type `{}` has field {f}, but it was missing during construction", re.t.clone()))
-                        } else {
-                            Ok(())
+                        let t: Result<()> = r
+                            .fields
+                            .keys()
+                            .map(|f| {
+                                if !re.fields.contains_key(f) {
+                                    Err(anyhow!("Type `{}` has field {f}, but it was missing during construction", re.t.clone()))
+                                } else {
+                                    Ok(())
+                                }
+                            })
+                            .collect();
+                        let _ = t?;
+
+                        let rtf = rec_type_fields?;
+
+                        for (_, e, t) in rtf {
+                            let et = self.expr_type(e.clone())?;
+                            self.types_match(e.clone(), et, t.clone())?;
                         }
-                    })
-                    .collect();
-                let _ = t?;
 
-                let rtf = rec_type_fields?;
-
-                for (_, e, t) in rtf {
-                    let et = self.expr_type(e.clone())?;
-                    self.types_match(e.clone(), et, t.clone())?;
-                }
-
-                Ok(re.t)
-            }
+                        Ok(re.t)
+                    }
             Expr::FieldAccess {
-                from,
-                offset,
-                fieldname,
-            } => {
-                let from_t = self.expr_type(*(from.clone()))?;
-                let rec_t = self.extract_record(from_t.clone(), *from)?;
-                let (got_offset, t) =
-                    rec_t
-                        .fields
-                        .get(&fieldname)
-                        .with_context(|| anyhow!("Type `{from_t}` does not have field `{fieldname}`"))?;
-                *offset.borrow_mut() = *got_offset;
-                Ok(t.clone())
-            }
+                        from,
+                        offset,
+                        fieldname,
+                    } => {
+                        let from_t = self.expr_type(*(from.clone()))?;
+                        let rec_t = self.extract_record(from_t.clone(), *from)?;
+                        let (got_offset, t) =
+                            rec_t
+                                .fields
+                                .get(&fieldname)
+                                .with_context(|| anyhow!("Type `{from_t}` does not have field `{fieldname}`"))?;
+                        *offset.borrow_mut() = *got_offset;
+                        Ok(t.clone())
+                    }
         }
         .and_then(|t| self.simplify(t))
     }
@@ -778,16 +824,23 @@ impl TypeChecker {
                 let TypeExpr::Base(n) = *expr else { panic!() };
                 let r = self.get_record(&n)?;
                 let Nominal::Opaque(_, vars) = self
+                    .current_block_mut()
                     .aliases
                     .get(&n)
                     .expect(&format!("Record type {n} is a transparent alias"))
+                    .clone()
                 else {
                     panic!("Record type {n} is a transparent alias")
                 };
 
+                self.push_block();
+                for (name, kind) in &vars {
+                    self.bind_typevar(name.clone(), kind.clone());
+                }
+
                 let TypeExpr::RecordType(r) = self.elim_forall(ForallElim {
                     expr: Box::new(TypeExpr::Forall(Forall {
-                        vars: vars.clone(),
+                        vars,
                         then: Box::new(TypeExpr::RecordType(r)),
                     })),
                     args,
@@ -795,6 +848,7 @@ impl TypeChecker {
                 else {
                     panic!();
                 };
+                self.pop_block();
                 Ok(r)
             }
             TypeExpr::RecordType(t) => Ok(t),
@@ -916,6 +970,7 @@ impl TypeChecker {
 struct Block {
     variables: HashMap<String, TypeExpr>,
     type_vars: HashMap<String, Kind>,
+    aliases: HashMap<String, Nominal>,
     return_type: TypeExpr,
     finalised: bool,
 }
@@ -926,6 +981,7 @@ impl Default for Block {
             variables: HashMap::new(),
             return_type: base_type("!"),
             finalised: false,
+            aliases: HashMap::new(),
             type_vars: HashMap::new(),
         }
     }
@@ -933,9 +989,7 @@ impl Default for Block {
 
 impl Block {
     fn declare_type_var(&mut self, name: String, kind: Kind) {
-        if self.type_vars.insert(name, kind).is_some() {
-            panic!()
-        }
+        self.type_vars.insert(name.clone(), kind);
     }
 
     fn var_kind(&self, name: &str) -> Option<&Kind> {

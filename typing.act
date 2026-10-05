@@ -11,15 +11,30 @@ type Num = Id[Int];
 type NumPid = Apply2[Apply1, APid, Num];
 
 type Person = [a]. {age: Int, name: String, gender: a};
+type SPerson = Apply2[Apply1, Person, String];
+
+type Input = [inp, ctx]. {input: inp, context: ctx};
+
+type Continuation = [inp, outp, ctx]. {input: inp, consumer: for[a]. Closure[outp, a, ctx], context: ctx};
+
+type Closure = [inp, outp, ctx]. Pid[Continuation[inp, outp, ctx]];
 
 type Other = {age: Int, name: String, gender: String};
+
+actor mult {
+	state u: Unit;
+	initialiser {}
+	update[ctx](cont: Continuation[Int, Int, ctx]) {
+		
+	}
+}
 
 actor print_person {
 	state u: Unit;
 
 	initialiser {}
 
-	update(person: Person[String]) {
+	update(person: SPerson) {
 		intrinsic(print_string, "Person ");
 		intrinsic(print_string, person.name);
 		intrinsic(print_string, "\n");

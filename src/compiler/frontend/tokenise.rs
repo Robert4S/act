@@ -35,6 +35,7 @@ pub enum TokenKind {
     Type,
     NewType,
     Let,
+    Exists,
 
     // Rules
     Infix(InfixToken),
@@ -322,6 +323,7 @@ fn update_keyword(token: Token) -> Token {
         (TokenKind::Symbol(s), n) => (
             match s.as_str() {
                 "actor" => TokenKind::Actor,
+                "exists" => TokenKind::Exists,
                 "daemon" => TokenKind::Daemon,
                 "type" => TokenKind::Type,
                 "newtype" => TokenKind::NewType,
