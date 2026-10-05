@@ -2,9 +2,38 @@ use core::slice;
 use std::{
     alloc::{alloc, dealloc, Layout},
     collections::HashSet,
+    hash::{BuildHasherDefault, Hasher},
     mem,
 };
 const TAG_MASK: usize = 1;
+
+/// Blocks with payloads up to this many bytes are recycled through per-size free lists
+/// instead of being returned to the system allocator.
+const POOLED_MAX: usize = 128;
+const POOL_CAPACITY: usize = 1 << 16;
+
+/// Hashes GC pointers by multiplication; they are already well distributed and SipHash
+/// dominated collection time.
+#[derive(Default)]
+pub struct PtrHasher(u64);
+
+impl Hasher for PtrHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ *b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+
+    fn write_usize(&mut self, n: usize) {
+        self.0 = (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
+    }
+}
+
+pub type MarkSet = HashSet<Gc, BuildHasherDefault<PtrHasher>>;
 
 pub fn mask_integer(value: i64) -> Gc {
     Gc((((value as usize) << 1) | TAG_MASK) as *mut u8)
@@ -114,19 +143,28 @@ impl Header {
 
 #[derive(Debug)]
 pub struct Alloc {
-    allocs: HashSet<Gc>,
+    allocs: Vec<Gc>,
+    pools: Vec<Vec<*mut Header>>,
     heap_limit: usize,
     heap_size: usize,
 }
 
+unsafe impl Send for Alloc {}
+
 impl Default for Alloc {
     fn default() -> Self {
         Self {
-            allocs: HashSet::new(),
+            allocs: Vec::new(),
+            pools: (0..=POOLED_MAX / 8).map(|_| Vec::new()).collect(),
             heap_limit: 4_000_000,
             heap_size: 0,
         }
     }
+}
+
+fn block_layout(size: u32) -> Layout {
+    let payload = (size as usize + 7) & !7;
+    Layout::from_size_align(mem::size_of::<Header>() + payload, 8).unwrap()
 }
 
 impl Alloc {
@@ -143,44 +181,46 @@ impl Alloc {
         self.heap_size >= self.heap_limit
     }
 
-    pub fn free_nonreachable(&mut self, reachable: &HashSet<Gc>) {
-        let nonreachable = self
-            .allocs
-            .difference(&reachable)
-            .cloned()
-            .collect::<Vec<_>>();
-
-        for p in nonreachable {
-            self.allocs.remove(&p);
-            self.free(p);
-        }
+    pub fn free_nonreachable(&mut self, reachable: &MarkSet) {
+        let mut allocs = mem::take(&mut self.allocs);
+        allocs.retain(|p| {
+            let live = reachable.contains(p);
+            if !live {
+                self.free(*p);
+            }
+            live
+        });
+        self.allocs = allocs;
     }
 
     pub fn alloc(&mut self, size: u32, tag: HeaderTag) -> Gc {
-        let layout = Layout::from_size_align(mem::size_of::<Header>() + size as usize, 8).unwrap();
         let header = Header::new(size, tag);
+        let class = (size as usize + 7) / 8;
+        let recycled = self.pools.get_mut(class).and_then(Vec::pop);
         let data_ptr = unsafe {
-            let header_ptr = alloc(layout) as *mut Header;
+            let header_ptr = recycled.unwrap_or_else(|| alloc(block_layout(size)) as *mut Header);
             header_ptr.write(header);
             header_ptr.add(1) as *mut u8
         };
         self.heap_size += size as usize;
-        self.allocs.insert(data_ptr.into());
+        self.allocs.push(data_ptr.into());
         data_ptr.into()
     }
 
     pub fn free(&mut self, data_ptr: Gc) {
         unsafe {
             let header_ptr = data_ptr.ptr::<Header>().sub(1);
-            let size = header_ptr.read().size.clone();
-            let layout =
-                Layout::from_size_align(mem::size_of::<Header>() + size as usize, 8).unwrap();
-            dealloc(header_ptr as *mut u8, layout);
+            let size = header_ptr.read().size;
             self.heap_size -= size as usize;
+            let class = (size as usize + 7) / 8;
+            match self.pools.get_mut(class) {
+                Some(pool) if pool.len() < POOL_CAPACITY => pool.push(header_ptr),
+                _ => dealloc(header_ptr as *mut u8, block_layout(size)),
+            }
         }
     }
 
-    pub fn mark(root: Gc, runtime: &RT, mark_set: &mut HashSet<Gc>) {
+    pub fn mark(root: Gc, runtime: &RT, mark_set: &mut MarkSet) {
         if is_integer(root) || root.0.is_null() {
             return;
         }
@@ -201,11 +241,11 @@ impl Alloc {
         }
     }
 
-    fn mark_pid(pid: Pid, runtime: &RT, mark_set: &mut HashSet<Gc>) {
+    fn mark_pid(pid: Pid, runtime: &RT, mark_set: &mut MarkSet) {
         runtime.find_reachable_vals(&pid, mark_set);
     }
 
-    fn trace_region(root: Gc, size: u32, runtime: &RT, mark_set: &mut HashSet<Gc>) {
+    fn trace_region(root: Gc, size: u32, runtime: &RT, mark_set: &mut MarkSet) {
         debug_assert!(
             size % 8 == 0,
             "A trace region must be the size of a whole number of 64 bit pointers"

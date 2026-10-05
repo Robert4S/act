@@ -165,7 +165,7 @@ pub extern "C" fn send_actor(runtime: &RT, actor: Gc, value: Gc) {
 #[no_mangle]
 pub extern "C" fn start_runtime() {
     RT.init_actors();
-    RT::supervise(RT.clone());
+    rayon::scope(|_| RT::supervise(RT.clone()));
 }
 
 #[no_mangle]

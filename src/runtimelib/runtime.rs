@@ -1,15 +1,17 @@
 use rayon::{current_num_threads, prelude::*};
 
-use super::gc::{Alloc, Gc, HeaderTag};
+use super::gc::{Alloc, Gc, HeaderTag, MarkSet};
 use parking_lot::Mutex;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     process::exit,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
 };
+
+const PARALLEL_EPOCH_THRESHOLD: usize = 16;
 
 pub type Init = extern "C" fn(&RT) -> Gc;
 pub type Update = extern "C" fn(&RT, Gc, Gc) -> Gc;
@@ -88,9 +90,9 @@ impl Mailboxes {
 
     fn pop_message(&mut self) -> Option<(Pid, Gc)> {
         let pid = self.queue.pop_front()?;
-        let mailbox = self.boxes.get_mut(&pid).expect(&format!(
-            "Holy guacamole pid {pid:?} is in the message queue but has no mailbox"
-        ));
+        let mailbox = self.boxes.get_mut(&pid).unwrap_or_else(|| {
+            panic!("Holy guacamole pid {pid:?} is in the message queue but has no mailbox")
+        });
         let message = mailbox.pop_front()?;
 
         Some((pid, message))
@@ -189,7 +191,7 @@ impl RT {
     }
 
     pub fn supervise(rt: Arc<Self>) {
-        let mut set = HashSet::new();
+        let mut set = MarkSet::default();
         loop {
             // TODO: Make sure an actor does not get more than one message to respond to in each
             // scheduling epoch
@@ -198,13 +200,21 @@ impl RT {
 
             drop(mailboxes);
 
-            let _new_states: Vec<Gc> = messages
-                .into_par_iter()
-                .map({
-                    let rt_clone = rt.clone();
-                    move |(pid, message)| rt_clone.update_actor(pid, message)
-                })
-                .collect();
+            // Updates are typically a few microseconds, far less than the cost of waking rayon
+            // workers, so only fan out once an epoch holds enough work to amortise it.
+            if messages.len() > PARALLEL_EPOCH_THRESHOLD {
+                let _new_states: Vec<Gc> = messages
+                    .into_par_iter()
+                    .map({
+                        let rt_clone = rt.clone();
+                        move |(pid, message)| rt_clone.update_actor(pid, message)
+                    })
+                    .collect();
+            } else {
+                for (pid, message) in messages {
+                    rt.update_actor(pid, message);
+                }
+            }
 
             unsafe {
                 let mut l = rt.allocator.make_guard_unchecked();
@@ -228,7 +238,7 @@ impl RT {
         self.mailboxes.lock().push_message(actor, value);
     }
 
-    pub fn find_reachable_vals(&self, pid: &Pid, marks: &mut HashSet<Gc>) {
+    pub fn find_reachable_vals(&self, pid: &Pid, marks: &mut MarkSet) {
         let mailboxes = unsafe { self.mailboxes.make_guard_unchecked() };
 
         let mailbox = unsafe {
@@ -265,7 +275,7 @@ impl RT {
         unsafe { self.actors.lock().get(pid).unwrap_unchecked().ensure_init() }
     }
 
-    fn live_values(&self, marks: &mut HashSet<Gc>) {
+    fn live_values(&self, marks: &mut MarkSet) {
         let statics = unsafe { self.statics.make_guard_unchecked() };
         let statics_clone = statics.clone();
         drop(statics);
