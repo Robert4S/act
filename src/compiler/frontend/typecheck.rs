@@ -400,19 +400,22 @@ impl TypeChecker {
         let f = match self.simplify(fe.expr.as_ref().clone())? {
             TypeExpr::Forall(f) => f,
             TypeExpr::Base(name) => {
-                let Kind::Function { args, output: _ } =
+                let Kind::Function { args: want_kinds, output: _ } =
                     self.type_kind(&TypeExpr::Base(name.clone()))?
                 else {
                     bail!("Type `{name}` was expected to have kind `{wanted_kind}`, but instead has kind `*`");
                 };
 
-                for ((have, have_kind), want_kind) in kinds.into_iter().zip(args) {
+                for ((have, have_kind), want_kind) in kinds.into_iter().zip(want_kinds) {
                     if have_kind != want_kind {
                         bail!("Type `{have}` was expected to have kind `{want_kind}`, but instead has kind `{have_kind}`");
                     }
                 }
 
-                return Ok(TypeExpr::ForallElim(fe));
+                return Ok(TypeExpr::ForallElim(ForallElim {
+                    expr: fe.expr,
+                    args,
+                }));
             }
             other => bail!("Expected type `{}` to have kind `{wanted_kind}` to be applied to type arguments, but instead it has kind `{}`", other, self.type_kind(&other)?),
         };
@@ -468,7 +471,15 @@ impl TypeChecker {
                             {
                                 panic!("{given:?}, want {opaque_args:?}")
                             }
-                            return Ok(TypeExpr::ForallElim(forall_elim));
+                            let args = forall_elim
+                                .args
+                                .into_iter()
+                                .map(|a| self.simplify(a))
+                                .collect::<Result<_>>()?;
+                            return Ok(TypeExpr::ForallElim(ForallElim {
+                                expr: forall_elim.expr,
+                                args,
+                            }));
                         }
                         _ => (),
                     };
