@@ -11,7 +11,7 @@ pub fn mask_integer(value: i64) -> Gc {
 }
 
 pub fn unmask_integer(value: Gc) -> i64 {
-    ((value.0 as usize) >> 1) as i64
+    (value.0 as i64) >> 1
 }
 
 pub fn unmask_pointer(value: Gc) -> *mut u8 {
@@ -66,9 +66,9 @@ impl Gc {
                 let size = own_h.size;
                 let mut offset = 0;
                 while offset < size {
-                    let self_ptr = unsafe { self.0.add(offset as usize).into() };
-                    let other_ptr = unsafe { other.0.add(offset as usize).into() };
-                    if !Gc(self_ptr).is_eq(Gc(other_ptr)) {
+                    let self_field = (self.0.add(offset as usize) as *const Gc).read();
+                    let other_field = (other.0.add(offset as usize) as *const Gc).read();
+                    if !self_field.is_eq(other_field) {
                         return false;
                     }
                     offset += 8;
@@ -151,6 +151,7 @@ impl Alloc {
             .collect::<Vec<_>>();
 
         for p in nonreachable {
+            self.allocs.remove(&p);
             self.free(p);
         }
     }
@@ -180,7 +181,7 @@ impl Alloc {
     }
 
     pub fn mark(root: Gc, runtime: &RT, mark_set: &mut HashSet<Gc>) {
-        if is_integer(root) {
+        if is_integer(root) || root.0.is_null() {
             return;
         }
         if mark_set.contains(&root) {
@@ -211,8 +212,8 @@ impl Alloc {
         );
         let mut offset = 0;
         while offset < size {
-            let ptr = unsafe { root.0.add(offset as usize).into() };
-            Self::mark(ptr, runtime, mark_set);
+            let field = unsafe { (root.0.add(offset as usize) as *const Gc).read() };
+            Self::mark(field, runtime, mark_set);
             offset += 8;
         }
     }

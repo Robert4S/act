@@ -191,8 +191,8 @@ pub unsafe extern "C" fn print_float(_rt: &RT, number: Gc) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn eval_int_div(_rt: &RT, left: i64, right: i64) -> Gc {
-    let res = left / right;
+pub unsafe extern "C" fn eval_int_div(_rt: &RT, left: Gc, right: Gc) -> Gc {
+    let res = unmask_integer(left) / unmask_integer(right);
     mask_integer(res)
 }
 
